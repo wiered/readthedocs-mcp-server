@@ -1,54 +1,57 @@
 ---
 name: readdocs
-description: Guides agents through the readdocs-mcp-server workflow—indexing Sphinx or Read the Docs HTML into a local SQLite FTS index, searching it, and fetching full page text. Use when the user connects this MCP server, mentions indexing RTD/Sphinx docs, readdocs, or local documentation search/fetch tools in this repository.
+description: readdocs-mcp-server — crawl docs root → SQLite FTS5; search/fetch cached text. Use when MCP connected, RTD/Sphinx indexing, readdocs, local doc search/fetch in this repo.
 ---
 
-# Read the Docs MCP (this repo)
+# readdocs-mcp-server (this repo)
 
-The **readdocs-mcp-server** package exposes MCP tools that crawl documentation under a single docs root URL, store plain text in SQLite + FTS5, and answer queries without live HTTP on each question.
+MCP tools: single docs root URL → crawl HTML → plain text in SQLite + FTS5. Queries hit index, not live HTTP each time.
 
-## Where this skill lives (Codex vs Cursor)
+## Skill path
 
-- **Codex / OpenAI agents**: project skills often live under `.agents/skills/`; this file is already there.
-- **Cursor**: built-in discovery commonly uses `~/.cursor/skills/` or `.cursor/skills/` in the repo. If Cursor does not pick up `.agents/skills/` automatically, add that path in Cursor skill settings or copy this folder to `.cursor/skills/readdocs/`.
+- **Codex / OpenAI**: `.agents/skills/` (this tree).
+- **Cursor**: often `~/.cursor/skills/` or `.cursor/skills/`. If `.agents/skills/` not picked up — add path in Cursor skill settings or copy folder to `.cursor/skills/readdocs/`.
 
-## When to use
+## When
 
-- Index a documentation site from an `http(s)` seed URL (Sphinx, Read the Docs, or similar static HTML trees).
-- Search the local index instead of re-crawling for every question.
-- Fetch one page by URL after `search` returns an `id`.
-- Inspect what is already cached (roots, page counts, last fetch).
+- Index from `http(s)` seed (Sphinx, RTD, static HTML).
+- `search` local index vs re-crawl every question.
+- `fetch` by hit `id` after `search`.
+- Cache introspection: roots, page counts, last fetch.
 
 ## Workflow
 
-1. Run `index_readthedocs` when the site is not indexed or the index is stale.
-2. Run `search` with a keyword-oriented query (see **Searching effectively** below).
-3. Run `fetch` with the hit `id` (same as the page URL) for full text.
-4. Use `list_indexed_sources` or the `readdocs://status` resource for a JSON snapshot of the cache.
+1. `index_readthedocs` — not indexed or stale.
+2. `search` — keyword-style (see below).
+3. **`fetch(id, start, end)` preferred** — 1-based inclusive lines; keeps context small. Use `search` hit line + small probe (`fetch` with narrow slice or first slice after tiny range) to pick window; bare `fetch(id)` only when page short or slice cannot answer question.
+4. `list_indexed_sources` or resource `readdocs://status` — JSON cache snapshot.
 
-## Tool semantics
+## Tools
 
-- `index_readthedocs(seed_url, max_pages=200, request_delay_sec=0.15, replace_source=True)` walks HTML under the normalized docs root, deduplicates URLs (including `?highlight=` and `index.html` vs directory URLs), seeds the queue from `sitemap.xml` when present, follows `<a href>` and common Sphinx `<link rel="next|prev|…">` navigation, then stores each page. Returns `IndexStats` with `source_base`, `fetched`, `skipped`, `sitemap_seeds`, `errors`, and `db_path`. For very large sites, raise `max_pages` (allowed up to 5000).
-- `search(query, limit=15)` returns ranked hits with `id`, `title`, `text` (snippet), and `url`; use `id` with `fetch`.
-- `fetch(id)` returns full stored body text plus metadata (`source_base`, `fetched_at`), or a not-found payload if the URL was never indexed.
-- `list_indexed_sources()` lists each `source_base`, `page_count`, and `last_fetched_at`.
+| Tool | Notes |
+|------|--------|
+| `index_readthedocs(seed_url, max_pages=200, request_delay_sec=0.15, replace_source=True)` | Walk under normalized docs root; dedupe URLs (`?highlight=`, `index.html` vs dir); `sitemap.xml` seeds if present; `<a href>`, Sphinx `<link rel="next|prev|…">`. Returns `IndexStats`: `source_base`, `fetched`, `skipped`, `sitemap_seeds`, `errors`, `db_path`. Big sites: raise `max_pages` (cap 5000). |
+| `search(query, limit=15)` | Hits: `id`, `title`, `url`, `text` — **one ~line** from matched chunk (real page words, not FTS snippet blob). |
+| `fetch(id, start=None, end=None)` | **Default agent habit:** pass `start`/`end` whenever possible — avoids token bloat. Body + `source_base`, `fetched_at`. No slice = whole page. Both `start`/`end` = **1-based inclusive** `splitlines()`, max 5000 lines/call. Response: `total_lines`, clamped `slice_start`/`slice_end`; empty `text` if `start` past EOF. |
+| `list_indexed_sources()` | Per `source_base`: `page_count`, `last_fetched_at`. |
 
-Optional environment (server process): `READTHEDOCS_MCP_DB` (SQLite path), `READTHEDOCS_MCP_IMPERSONATE` (curl_cffi TLS profile, default `chrome`), transport/host/port variables for HTTP modes.
+**Env (server process):** `READTHEDOCS_MCP_DB`, `READTHEDOCS_MCP_IMPERSONATE` (curl_cffi profile, default `chrome`), transport/host/port for HTTP modes.
 
-## Searching effectively
+## Search (FTS5 lexical, chunked body)
 
-The index is **lexical FTS5** (stemmed tokens on page **chunks**), not semantic/vector search. The server turns your `query` into MATCH clauses: common English **stop words are dropped**; **“strong”** tokens (long words, identifiers with `_` or `.`, digits, mixed case like `InputFile`) are **required** (`AND`); shorter filler words are grouped with **`OR`** when mixed with strong tokens; there is a **fallback** search with broader `OR` if the strict query returns nothing.
+Not vectors. Query → MATCH: **stop words dropped**; **strong** tokens (long, `_`/`.`, digits, mixed case e.g. `InputFile`) → **AND**; short filler with strong → **OR** groups; **fallback** broader OR if strict empty.
 
-**How to query so results are good:**
+**Query tips:**
 
-1. **Prefer short, concrete strings** that appear in docs: API names (`send_photo`), types (`InputFile`), modules (`telebot.types`), errors, config keys. Avoid long prose unless you need it; every extra rare word can narrow hits too much before fallback runs.
-2. **Use double quotes** for a phrase that must appear as consecutive words in the text, e.g. `"io.IOBase"` or `"send a file"`.
-3. **Try variants** if the first `search` is empty or weak: synonyms, snake_case vs CamelCase, module prefix vs bare name, fewer words, or a second pass with `limit` raised (up to 100).
-4. **Remember `fetch`**: `search` returns a **snippet** from the best matching chunk; the full page (all chunks merged in storage) comes from `fetch` using the hit `id` (URL).
+1. Short concrete strings from docs: API (`send_photo`), types (`InputFile`), modules (`telebot.types`), errors, keys. Long prose = extra rare tokens → over-narrow before fallback.
+2. Double quotes = phrase must be consecutive: `"io.IOBase"`, `"send a file"`.
+3. Empty/weak hits: synonyms, snake vs CamelCase, module prefix vs bare name, fewer words, higher `limit` (up to 100).
+4. `search.text` = one context line; **do not** pull full page by default — `fetch(id, start, end)`; widen slice or follow-up slice using `total_lines` / prior `slice_*`; `fetch(id)` without bounds only for short pages or when slice clearly insufficient.
 
-## Practical rules
+## Rules
 
-- Prefer `search` before `fetch`; do not invent page contents when the index can supply them.
-- If a page is missing, re-run `index_readthedocs` with the correct versioned root URL (for example `…/en/stable/`).
-- Treat stored content as extracted text from HTML, not a layout-perfect copy of the site.
-- Section-level anchors are not separate index rows; the stored page is still one row for `fetch`, while FTS ranks overlapping **chunks** of body text for better relevance.
+- Prefer **`fetch(id, start, end)`** over full-page `fetch(id)` — token hygiene; expand range only if needed.
+- `search` before `fetch`; no invented page text if index has it.
+- Missing page → re-`index_readthedocs` with correct versioned root (e.g. `…/en/stable/`).
+- Stored = HTML-extracted text, not pixel layout.
+- Anchors ≠ separate rows; one row per page for `fetch`; FTS ranks overlapping **chunks** for relevance.

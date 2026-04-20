@@ -289,6 +289,58 @@ def _body_to_chunks(body: str) -> list[str]:
     return out if out else [text[:_CHUNK_MAX]]
 
 
+_CONTEXT_LINE_MAX = 800
+
+
+def _query_match_needles(query: str) -> list[str]:
+    """Tokens (and quoted-phrase words) used to pick the best single line from a hit chunk."""
+    phrases, tokens = _collect_query_pieces(query)
+    needles: list[str] = []
+    for t in tokens:
+        needles.append(t)
+    for ph in phrases:
+        for w in re.findall(r"[^\s]+", ph):
+            w = w.strip('"\',.;:!?()[]')
+            if len(w) < 2:
+                continue
+            needles.append(w)
+    seen: set[str] = set()
+    out: list[str] = []
+    for n in needles:
+        k = n.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(n)
+    return out
+
+
+def _context_line_from_chunk(chunk: str, query: str) -> str:
+    """One approximate source line from the matched chunk (subset of the stored page body)."""
+    text = chunk.strip()
+    if not text:
+        return ""
+    needles = _query_match_needles(query)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return text[:_CONTEXT_LINE_MAX]
+    if not needles:
+        pick = max(lines, key=len)
+        return pick[:_CONTEXT_LINE_MAX]
+
+    def score(line: str) -> int:
+        low = line.lower()
+        return sum(1 for n in needles if n.lower() in low)
+
+    best_s = max(score(ln) for ln in lines)
+    candidates = [ln for ln in lines if score(ln) == best_s and best_s > 0]
+    if not candidates:
+        pick = max(lines, key=len)
+    else:
+        pick = max(candidates, key=len)
+    return pick[:_CONTEXT_LINE_MAX]
+
+
 @dataclass
 class SearchHit:
     url: str
@@ -437,18 +489,16 @@ class DocIndex:
         if primary is None:
             return []
         limit = max(1, min(limit, 100))
-        return self._search_fts(primary, limit) or (
-            self._search_fts(fallback, limit) if fallback else []
+        return self._search_fts(primary, limit, query) or (
+            self._search_fts(fallback, limit, query) if fallback else []
         )
 
-    def _search_fts(self, fts: str, limit: int) -> list[SearchHit]:
-        # snippet() must run in a SELECT that uses MATCH on the fts table directly
-        # (not inside a CTE/window), or SQLite raises "unable to use function snippet".
+    def _search_fts(self, fts: str, limit: int, user_query: str) -> list[SearchHit]:
         fetch_cap = min(1000, max(200, limit * 40))
         sql = """
             SELECT p.url AS url,
                    p.title AS title,
-                   snippet(search_chunks_fts, 2, '[', ']', ' … ', 32) AS snip,
+                   sc.chunk AS chunk,
                    bm25(search_chunks_fts) AS rnk
             FROM search_chunks_fts
             JOIN search_chunks AS sc ON search_chunks_fts.rowid = sc.chunk_id
@@ -472,11 +522,12 @@ class DocIndex:
             if url in seen:
                 continue
             seen.add(url)
+            line = _context_line_from_chunk(row["chunk"] or "", user_query)
             out.append(
                 SearchHit(
                     url=url,
                     title=row["title"],
-                    snippet=row["snip"],
+                    snippet=line,
                     rank=float(row["rnk"]),
                 )
             )

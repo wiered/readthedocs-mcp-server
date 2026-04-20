@@ -51,7 +51,7 @@ class IndexStats(BaseModel):
 
 
 class SearchResult(BaseModel):
-    """Minimal search hit compatible with search/fetch MCP patterns."""
+    """Search hit: `text` is one approximate line from the matched page region (best line in the hit chunk)."""
 
     id: str
     title: str
@@ -73,13 +73,16 @@ class FetchMetadata(BaseModel):
 
 
 class FetchResponse(BaseModel):
-    """Full indexed page payload."""
+    """Indexed page payload (full body or a 1-based inclusive line range)."""
 
     id: str
     title: str
     text: str
     url: str
     metadata: FetchMetadata | None
+    total_lines: int | None = None
+    slice_start: int | None = None
+    slice_end: int | None = None
 
 
 class SourceListResponse(BaseModel):
@@ -138,6 +141,34 @@ def _validate_limit(limit: int) -> int:
     return limit
 
 
+_MAX_FETCH_LINES = 5000
+
+
+def _validate_line_slice(start: int | None, end: int | None) -> tuple[int, int] | None:
+    if start is None and end is None:
+        return None
+    if start is None or end is None:
+        raise ValueError("Provide both start and end (1-based inclusive line numbers), or omit both for the full page.")
+    if start < 1 or end < start:
+        raise ValueError("start must be >= 1 and end must be >= start.")
+    if end - start + 1 > _MAX_FETCH_LINES:
+        raise ValueError(f"At most {_MAX_FETCH_LINES} lines per fetch.")
+    return (start, end)
+
+
+def _slice_body_lines(body: str, start: int, end: int) -> tuple[str, int, int, int]:
+    """Return (slice_text, total_lines, slice_start_used, slice_end_used)."""
+    lines = body.splitlines()
+    n = len(lines)
+    if n == 0:
+        return "", 0, start, end
+    if start > n:
+        return "", n, start, min(end, n)
+    s = max(1, start)
+    e = min(max(s, end), n)
+    return "\n".join(lines[s - 1 : e]), n, s, e
+
+
 def create_server() -> FastMCP:
     """Build the FastMCP server with tools, prompts, and resources."""
     mcp = FastMCP(
@@ -183,7 +214,7 @@ def create_server() -> FastMCP:
 
     @mcp.tool()
     async def search(query: str, limit: int = 15) -> SearchResponse:
-        """Search indexed documentation and return ids that can be used with `fetch`."""
+        """Search indexed docs; each hit's `text` is one approximate line from the matched page region."""
         stripped_query = query.strip()
         if not stripped_query:
             raise ValueError("query must not be empty")
@@ -202,11 +233,16 @@ def create_server() -> FastMCP:
         return SearchResponse(results=results)
 
     @mcp.tool()
-    async def fetch(id: str) -> FetchResponse:  # noqa: A002
-        """Load one indexed page by id. The id is the canonical page URL from `search`."""
+    async def fetch(
+        id: str,  # noqa: A002
+        start: int | None = None,
+        end: int | None = None,
+    ) -> FetchResponse:
+        """Load one indexed page by id (URL from `search`). Optional start/end: 1-based inclusive line numbers."""
         page_id = id.strip()
         if not page_id:
             raise ValueError("id must not be empty")
+        span = _validate_line_slice(start, end)
 
         idx = _index()
         doc = idx.get_page(page_id)
@@ -217,15 +253,36 @@ def create_server() -> FastMCP:
                 text="No indexed page for this id. Run index_readthedocs first or check the URL.",
                 url=page_id,
                 metadata=None,
+                total_lines=None,
+                slice_start=None,
+                slice_end=None,
             )
 
         metadata = doc.get("metadata")
+        body = str(doc["text"])
+        total_lines = len(body.splitlines())
+        if span is None:
+            return FetchResponse(
+                id=str(doc["id"]),
+                title=str(doc["title"]),
+                text=body,
+                url=str(doc["url"]),
+                metadata=FetchMetadata.model_validate(metadata) if metadata else None,
+                total_lines=total_lines,
+                slice_start=None,
+                slice_end=None,
+            )
+        s, e = span
+        slice_text, n_lines, s_use, e_use = _slice_body_lines(body, s, e)
         return FetchResponse(
             id=str(doc["id"]),
             title=str(doc["title"]),
-            text=str(doc["text"]),
+            text=slice_text,
             url=str(doc["url"]),
             metadata=FetchMetadata.model_validate(metadata) if metadata else None,
+            total_lines=n_lines,
+            slice_start=s_use,
+            slice_end=e_use,
         )
 
     @mcp.tool()
