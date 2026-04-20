@@ -34,6 +34,37 @@ def test_validate_limit() -> None:
         main._validate_limit(101)
 
 
+def test_validate_list_pages_limit() -> None:
+    assert main._validate_list_pages_limit(1) == 1
+    assert main._validate_list_pages_limit(500) == 500
+    with pytest.raises(ValueError):
+        main._validate_list_pages_limit(0)
+    with pytest.raises(ValueError):
+        main._validate_list_pages_limit(501)
+
+
+def test_validate_offset() -> None:
+    assert main._validate_offset(0) == 0
+    with pytest.raises(ValueError):
+        main._validate_offset(-1)
+    with pytest.raises(ValueError):
+        main._validate_offset(2_000_000)
+
+
+def test_optional_source_base() -> None:
+    assert main._optional_source_base(None) is None
+    assert main._optional_source_base("  ") is None
+    assert main._optional_source_base(" https://x/ ") == "https://x/"
+
+
+def test_validate_page_url() -> None:
+    assert main._validate_page_url("  https://x/p  ") == "https://x/p"
+    with pytest.raises(ValueError, match="empty"):
+        main._validate_page_url("  ")
+    with pytest.raises(ValueError, match="http"):
+        main._validate_page_url("/p")
+
+
 def test_validate_line_slice() -> None:
     assert main._validate_line_slice(None, None) is None
     with pytest.raises(ValueError, match="both"):

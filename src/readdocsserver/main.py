@@ -19,7 +19,7 @@ INSTRUCTIONS = """
 Index Read the Docs / Sphinx HTML locally and query it with MCP search/fetch tools.
 
 Available MCP capabilities:
-- Tools for indexing, searching, fetching, and listing indexed sources.
+- Tools for indexing, searching, fetching, listing indexed sources, listing pages per root, and scoped search (whole source or single page).
 - Prompts exposed as slash commands in compatible MCP clients for common workflows.
 - A status resource with the current database path and indexed source summary.
 
@@ -51,12 +51,15 @@ class IndexStats(BaseModel):
 
 
 class SearchResult(BaseModel):
-    """Search hit: `text` is one approximate line from the matched page region (best line in the hit chunk)."""
+    """Search hit with one approximate matching line and its approximate line number."""
 
     id: str
     title: str
     text: str
     url: str
+    line: int | None = None
+    chunk_line_start: int | None = None
+    chunk_line_end: int | None = None
 
 
 class SearchResponse(BaseModel):
@@ -91,6 +94,24 @@ class SourceListResponse(BaseModel):
     sources: list[IndexedSource]
     db_path: str
     default_db_hint: str
+
+
+class ListedPage(BaseModel):
+    """One indexed documentation page (URL + title + root)."""
+
+    url: str
+    title: str
+    source_base: str
+
+
+class ListPagesResponse(BaseModel):
+    """Paginated list of indexed pages."""
+
+    pages: list[ListedPage]
+    total: int
+    limit: int
+    offset: int
+    db_path: str
 
 
 def _index() -> DocIndex:
@@ -139,6 +160,44 @@ def _validate_limit(limit: int) -> int:
     if not 1 <= limit <= 100:
         raise ValueError("limit must be between 1 and 100")
     return limit
+
+
+def _validate_list_pages_limit(limit: int) -> int:
+    if not 1 <= limit <= 500:
+        raise ValueError("limit must be between 1 and 500")
+    return limit
+
+
+def _validate_offset(offset: int) -> int:
+    if offset < 0:
+        raise ValueError("offset must be >= 0")
+    if offset > 1_000_000:
+        raise ValueError("offset is too large")
+    return offset
+
+
+def _optional_source_base(source_base: str | None) -> str | None:
+    if source_base is None:
+        return None
+    s = source_base.strip()
+    return s or None
+
+
+def _optional_url_contains(url_contains: str | None) -> str | None:
+    if url_contains is None:
+        return None
+    s = url_contains.strip()
+    return s or None
+
+
+def _validate_page_url(page_url: str) -> str:
+    u = page_url.strip()
+    if not u:
+        raise ValueError("page_url must not be empty")
+    parsed = urlparse(u)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("page_url must be an absolute http(s) URL")
+    return u
 
 
 _MAX_FETCH_LINES = 5000
@@ -215,24 +274,90 @@ def create_server() -> FastMCP:
         return IndexStats.model_validate({**stats, "db_path": str(idx.db_path)})
 
     @mcp.tool()
-    async def search(query: str, limit: int = 15) -> SearchResponse:
-        """Search indexed docs; each hit's `text` is one approximate line from the matched page region."""
+    async def search(
+        query: str,
+        limit: int = 15,
+        source_base: str | None = None,
+    ) -> SearchResponse:
+        """Search indexed docs (at most one hit per page). Optional source_base limits results to one indexed docs root."""
         stripped_query = query.strip()
         if not stripped_query:
             raise ValueError("query must not be empty")
 
         idx = _index()
-        hits = idx.search(stripped_query, limit=_validate_limit(limit))
+        hits = idx.search(
+            stripped_query,
+            limit=_validate_limit(limit),
+            source_base=_optional_source_base(source_base),
+        )
         results = [
             SearchResult(
                 id=hit.url,
                 title=hit.title,
                 text=hit.snippet,
                 url=hit.url,
+                line=hit.line,
+                chunk_line_start=hit.chunk_line_start,
+                chunk_line_end=hit.chunk_line_end,
             )
             for hit in hits
         ]
         return SearchResponse(results=results)
+
+    @mcp.tool()
+    async def search_in_file(
+        page_url: str,
+        query: str,
+        limit: int = 15,
+    ) -> SearchResponse:
+        """Search inside one indexed page URL; may return several hits (different chunks) from the same file."""
+        stripped_query = query.strip()
+        if not stripped_query:
+            raise ValueError("query must not be empty")
+        validated_url = _validate_page_url(page_url)
+
+        idx = _index()
+        hits = idx.search_in_page(
+            validated_url, stripped_query, limit=_validate_limit(limit)
+        )
+        results = [
+            SearchResult(
+                id=hit.url,
+                title=hit.title,
+                text=hit.snippet,
+                url=hit.url,
+                line=hit.line,
+                chunk_line_start=hit.chunk_line_start,
+                chunk_line_end=hit.chunk_line_end,
+            )
+            for hit in hits
+        ]
+        return SearchResponse(results=results)
+
+    @mcp.tool()
+    async def list_documentation_pages(
+        source_base: str | None = None,
+        url_contains: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> ListPagesResponse:
+        """List indexed page URLs and titles; filter by documentation root (source_base) and/or URL substring."""
+        lim = _validate_list_pages_limit(limit)
+        off = _validate_offset(offset)
+        idx = _index()
+        pages, total = idx.list_pages(
+            source_base=_optional_source_base(source_base),
+            url_contains=_optional_url_contains(url_contains),
+            limit=lim,
+            offset=off,
+        )
+        return ListPagesResponse(
+            pages=[ListedPage.model_validate(p) for p in pages],
+            total=total,
+            limit=lim,
+            offset=off,
+            db_path=str(idx.db_path),
+        )
 
     @mcp.tool()
     async def fetch(
@@ -335,6 +460,7 @@ def create_server() -> FastMCP:
         return (
             "Search the local Read the Docs index with the `search` tool.\n"
             f"query: {stripped_query}\n"
+            "Optional: pass `source_base` from `list_indexed_sources` to scope to one docs root.\n"
             "Return the most relevant hits and suggest which id to fetch next."
         )
 

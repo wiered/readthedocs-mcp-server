@@ -42,7 +42,10 @@ def test_canonical_index_html() -> None:
 def test_under_prefix() -> None:
     origin = "https://docs.python.org"
     prefix = "/3/"
-    assert under_prefix("https://docs.python.org/3/library/os.html", origin, prefix) is True
+    assert (
+        under_prefix("https://docs.python.org/3/library/os.html", origin, prefix)
+        is True
+    )
     assert under_prefix("https://docs.python.org/2/", origin, prefix) is False
     assert under_prefix("https://evil.com/3/", origin, prefix) is False
 

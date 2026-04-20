@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from readdocsserver.store import (
     DocIndex,
     _body_to_chunks,
+    _body_to_chunks_with_lines,
     _collect_query_pieces,
     _context_line_from_chunk,
     _fts_match_queries,
@@ -63,6 +62,14 @@ def test_body_to_chunks_preserves_distant_token() -> None:
     assert any("UNIQUE_MARKER_TOKEN" in c for c in chunks), chunks
 
 
+def test_body_to_chunks_with_lines_tracks_ranges() -> None:
+    body = "alpha\n\nbeta\n\ngamma\ndelta\n"
+    spans = _body_to_chunks_with_lines(body)
+    assert [span.text for span in spans] == _body_to_chunks(body)
+    assert spans[0].line_start == 1
+    assert spans[0].line_end == 6
+
+
 def test_doc_index_roundtrip(tmp_path: Path) -> None:
     db = tmp_path / "idx.sqlite"
     idx = DocIndex(db)
@@ -79,6 +86,7 @@ def test_doc_index_roundtrip(tmp_path: Path) -> None:
     assert len(hits) == 1
     assert hits[0].url == url
     assert "UNIQUEHIT" in hits[0].snippet
+    assert hits[0].line == 3
 
     n = idx.clear_source("https://docs.example/en/")
     assert n == 1
@@ -97,6 +105,22 @@ def test_doc_index_update_replaces_chunks(tmp_path: Path) -> None:
     assert len(hits) == 1
 
 
+def test_doc_index_search_estimates_line_for_flattened_single_block(
+    tmp_path: Path,
+) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    url = "https://x/flat"
+    body_lines = [f"line {i}" for i in range(1, 20)]
+    body_lines[11] = "allow_paid_broadcast marker token"
+    body = "\n".join(body_lines) + "\n"
+    idx.upsert_page(url, "Flat", body, "https://x/", 1)
+
+    hits = idx.search("allow_paid_broadcast", limit=3)
+    assert len(hits) == 1
+    assert hits[0].line == 12
+    assert "allow_paid_broadcast" in hits[0].snippet
+
+
 def test_list_sources(tmp_path: Path) -> None:
     idx = DocIndex(tmp_path / "db.sqlite")
     idx.upsert_page("https://a/p", "A", "body", "https://a/", 10)
@@ -111,3 +135,65 @@ def test_stats_json(tmp_path: Path) -> None:
     s = idx.stats_json()
     assert "db_path" in s
     assert "sources" in s
+
+
+def test_list_pages_filter_and_pagination(tmp_path: Path) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    idx.upsert_page("https://a/en/p1", "P1", "b", "https://a/en/", 1)
+    idx.upsert_page("https://a/en/p2", "P2", "b", "https://a/en/", 1)
+    idx.upsert_page("https://b/en/x", "X", "b", "https://b/en/", 1)
+
+    pages, total = idx.list_pages(source_base="https://a/en/")
+    assert total == 2
+    assert {p["url"] for p in pages} == {"https://a/en/p1", "https://a/en/p2"}
+
+    pages2, total2 = idx.list_pages(url_contains="p1")
+    assert total2 == 1
+    assert pages2[0]["url"] == "https://a/en/p1"
+
+    p3, t3 = idx.list_pages(limit=1, offset=0)
+    assert t3 == 3
+    assert len(p3) == 1
+
+
+def test_search_source_base_scopes_results(tmp_path: Path) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    idx.upsert_page(
+        "https://a/en/z.html",
+        "A",
+        "ONLY_A_TOKEN_HERE",
+        "https://a/en/",
+        1,
+    )
+    idx.upsert_page(
+        "https://b/en/z.html",
+        "B",
+        "ONLY_B_TOKEN_HERE",
+        "https://b/en/",
+        1,
+    )
+    hits_all = idx.search("ONLY_A_TOKEN_HERE", limit=5)
+    assert len(hits_all) == 1
+    hits_b = idx.search("ONLY_A_TOKEN_HERE", limit=5, source_base="https://b/en/")
+    assert hits_b == []
+    hits_a = idx.search("ONLY_A_TOKEN_HERE", limit=5, source_base="https://a/en/")
+    assert len(hits_a) == 1
+    assert hits_a[0].url == "https://a/en/z.html"
+
+
+def test_search_in_page_multiple_chunks(tmp_path: Path) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    url = "https://docs.example/page.html"
+    body = (
+        "MATCHRARE\n\n"
+        + ("x" * 3000)
+        + "\n\nMIDDLE\n\n"
+        + ("y" * 3000)
+        + "\n\nMATCHRARE\n"
+    )
+    idx.upsert_page(url, "Big", body, "https://docs.example/", 1)
+    hits = idx.search_in_page(url, "MATCHRARE", limit=10)
+    assert len(hits) >= 2
+    assert all(h.url == url for h in hits)
+    global_hits = idx.search("MATCHRARE", limit=10)
+    assert len(global_hits) == 1
