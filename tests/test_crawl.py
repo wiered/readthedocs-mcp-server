@@ -80,6 +80,48 @@ def test_extract_text_rst_content() -> None:
     assert "removed" not in text
 
 
+def test_extract_text_sphinx_signature_and_field_list() -> None:
+    html = b"""<!doctype html><html><head><title>API</title></head>
+<body>
+  <article role="main">
+    <dl class="py method">
+      <dt class="sig sig-object py" id="mod.send_photo">
+        <span class="sig-name descname"><span class="pre">send_photo</span></span>
+        <span class="sig-paren">(</span>
+        <em class="sig-param"><span class="n"><span class="pre">chat_id</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">str</span></span></em>,
+        <em class="sig-param"><span class="n"><span class="pre">photo</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">Any</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">str</span></span></em>
+        <span class="sig-paren">)</span>
+        <span class="sig-return"><span class="sig-return-icon">&#8594;</span> <span class="sig-return-typehint"><span class="pre">Message</span></span></span>
+        <a class="headerlink" href="#mod.send_photo" title="Link to this definition">&#182;</a>
+      </dt>
+      <dd>
+        <p>Use this method to send photos.</p>
+        <dl class="field-list simple">
+          <dt class="field-odd">Parameters<span class="colon">:</span></dt>
+          <dd class="field-odd">
+            <ul class="simple">
+              <li><p><strong>chat_id</strong> (<code>int</code> or <code>str</code>) - Chat id.</p></li>
+              <li><p><strong>business_connection_id</strong> (<code>str</code>) - Business connection.</p></li>
+            </ul>
+          </dd>
+          <dt class="field-even">Returns<span class="colon">:</span></dt>
+          <dd class="field-even"><p>On success, the sent Message is returned.</p></dd>
+          <dt class="field-odd">Return type<span class="colon">:</span></dt>
+          <dd class="field-odd"><p><code>telebot.types.Message</code></p></dd>
+        </dl>
+      </dd>
+    </dl>
+  </article>
+</body></html>"""
+    title, text = extract_text_and_title(html, "https://x/")
+    assert title == "API"
+    assert "send_photo(chat_id: int | str, photo: Any | str) → Message" in text
+    assert "chat_id(int or str) – Chat id." in text
+    assert "business_connection_id(str) – Business connection." in text
+    assert "Returns:\nOn success, the sent Message is returned." in text
+    assert "Return type:\ntelebot.types.Message" in text
+
+
 def test_same_site_links_filters_prefix() -> None:
     html = b"""
     <html><body>
