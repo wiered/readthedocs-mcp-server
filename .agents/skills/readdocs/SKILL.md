@@ -22,7 +22,7 @@ The **readdocs-mcp-server** package exposes MCP tools that crawl documentation u
 ## Workflow
 
 1. Run `index_readthedocs` when the site is not indexed or the index is stale.
-2. Run `search` with a natural-language or keyword query.
+2. Run `search` with a keyword-oriented query (see **Searching effectively** below).
 3. Run `fetch` with the hit `id` (same as the page URL) for full text.
 4. Use `list_indexed_sources` or the `readdocs://status` resource for a JSON snapshot of the cache.
 
@@ -35,9 +35,20 @@ The **readdocs-mcp-server** package exposes MCP tools that crawl documentation u
 
 Optional environment (server process): `READTHEDOCS_MCP_DB` (SQLite path), `READTHEDOCS_MCP_IMPERSONATE` (curl_cffi TLS profile, default `chrome`), transport/host/port variables for HTTP modes.
 
+## Searching effectively
+
+The index is **lexical FTS5** (stemmed tokens on page **chunks**), not semantic/vector search. The server turns your `query` into MATCH clauses: common English **stop words are dropped**; **“strong”** tokens (long words, identifiers with `_` or `.`, digits, mixed case like `InputFile`) are **required** (`AND`); shorter filler words are grouped with **`OR`** when mixed with strong tokens; there is a **fallback** search with broader `OR` if the strict query returns nothing.
+
+**How to query so results are good:**
+
+1. **Prefer short, concrete strings** that appear in docs: API names (`send_photo`), types (`InputFile`), modules (`telebot.types`), errors, config keys. Avoid long prose unless you need it; every extra rare word can narrow hits too much before fallback runs.
+2. **Use double quotes** for a phrase that must appear as consecutive words in the text, e.g. `"io.IOBase"` or `"send a file"`.
+3. **Try variants** if the first `search` is empty or weak: synonyms, snake_case vs CamelCase, module prefix vs bare name, fewer words, or a second pass with `limit` raised (up to 100).
+4. **Remember `fetch`**: `search` returns a **snippet** from the best matching chunk; the full page (all chunks merged in storage) comes from `fetch` using the hit `id` (URL).
+
 ## Practical rules
 
 - Prefer `search` before `fetch`; do not invent page contents when the index can supply them.
 - If a page is missing, re-run `index_readthedocs` with the correct versioned root URL (for example `…/en/stable/`).
 - Treat stored content as extracted text from HTML, not a layout-perfect copy of the site.
-- Section-level anchors are not separate index rows; the whole page body is one FTS document unless the product changes.
+- Section-level anchors are not separate index rows; the stored page is still one row for `fetch`, while FTS ranks overlapping **chunks** of body text for better relevance.
