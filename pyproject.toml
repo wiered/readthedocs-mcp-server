@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "readdocs-mcp-server"
+version = "0.1.0"
+description = "MCP server to index and search Read the Docs (Sphinx) sites"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "wrds" },
+]
+keywords = ["mcp", "model-context-protocol", "readthedocs", "sphinx", "documentation", "cursor", "codex"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Documentation",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Documentation",
+]
+dependencies = [
+    "mcp[cli]>=1.2.0",
+    "curl-cffi>=0.7.0",
+    "beautifulsoup4>=4.12.0",
+    "pydantic>=2.13.2",
+]
+
+[project.scripts]
+readdocs-mcp = "readdocsserver.main:main"
+
+[project.urls]
+Homepage = "https://github.com/wrds/readthedocs-mcp-server"
+Repository = "https://github.com/wrds/readthedocs-mcp-server"
+Issues = "https://github.com/wrds/readthedocs-mcp-server/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
