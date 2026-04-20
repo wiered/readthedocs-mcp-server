@@ -30,6 +30,7 @@ dependencies = [
     "curl-cffi>=0.7.0",
     "beautifulsoup4>=4.12.0",
     "pydantic>=2.13.2",
+    "pytest>=9.0.3",
 ]
 
 [project.scripts]
