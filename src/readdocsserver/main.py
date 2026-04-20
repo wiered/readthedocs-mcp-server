@@ -148,7 +148,9 @@ def _validate_line_slice(start: int | None, end: int | None) -> tuple[int, int] 
     if start is None and end is None:
         return None
     if start is None or end is None:
-        raise ValueError("Provide both start and end (1-based inclusive line numbers), or omit both for the full page.")
+        raise ValueError(
+            "Provide both start and end (1-based inclusive line numbers), or omit both for the full page."
+        )
     if start < 1 or end < start:
         raise ValueError("start must be >= 1 and end must be >= start.")
     if end - start + 1 > _MAX_FETCH_LINES:
@@ -346,7 +348,11 @@ def create_server() -> FastMCP:
         page_id = id.strip()
         if not page_id:
             raise ValueError("id must not be empty")
-        extra = f"\nThen answer this question about the page: {question.strip()}" if question and question.strip() else ""
+        extra = (
+            f"\nThen answer this question about the page: {question.strip()}"
+            if question and question.strip()
+            else ""
+        )
         return (
             "Fetch this indexed documentation page with the `fetch` tool.\n"
             f"id: {page_id}"

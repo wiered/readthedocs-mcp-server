@@ -144,7 +144,7 @@ def _collect_query_pieces(raw: str) -> tuple[list[str], list[str]]:
     tokens: list[str] = []
     for piece in rest_parts:
         for w in re.findall(r"[^\s]+", piece):
-            w = w.strip('"\',.;:!?()[]')
+            w = w.strip("\"',.;:!?()[]")
             if len(w) < 2:
                 continue
             low = w.lower()
@@ -210,11 +210,20 @@ def _fts_match_queries(user_query: str) -> tuple[str | None, str | None]:
     # Fallback: OR of longest tokens; optional AND with quoted phrases when phrases exist.
     fallback_tokens = sorted(set(tokens), key=len, reverse=True)[:12]
     if phrases and fallback_tokens:
-        fb = " AND ".join(phrase_terms) + " AND (" + " OR ".join(_quote_token(t) for t in fallback_tokens) + ")"
+        fb = (
+            " AND ".join(phrase_terms)
+            + " AND ("
+            + " OR ".join(_quote_token(t) for t in fallback_tokens)
+            + ")"
+        )
     elif phrases:
         fb = " AND ".join(phrase_terms) if len(phrase_terms) > 1 else phrase_terms[0]
     else:
-        fb = " OR ".join(_quote_token(t) for t in fallback_tokens) if fallback_tokens else None
+        fb = (
+            " OR ".join(_quote_token(t) for t in fallback_tokens)
+            if fallback_tokens
+            else None
+        )
 
     if fb == primary:
         fb = None
@@ -235,7 +244,9 @@ def _hard_split(text: str, max_chars: int, overlap: int) -> list[str]:
     return out
 
 
-def _merge_paragraphs(paragraphs: list[str], max_chars: int, min_merge: int) -> list[str]:
+def _merge_paragraphs(
+    paragraphs: list[str], max_chars: int, min_merge: int
+) -> list[str]:
     chunks: list[str] = []
     buf: list[str] = []
     size = 0
@@ -300,7 +311,7 @@ def _query_match_needles(query: str) -> list[str]:
         needles.append(t)
     for ph in phrases:
         for w in re.findall(r"[^\s]+", ph):
-            w = w.strip('"\',.;:!?()[]')
+            w = w.strip("\"',.;:!?()[]")
             if len(w) < 2:
                 continue
             needles.append(w)
@@ -429,16 +440,24 @@ class DocIndex:
                         """
                     )
                 n_pages = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
-                n_chunks = conn.execute("SELECT COUNT(*) FROM search_chunks").fetchone()[0]
+                n_chunks = conn.execute(
+                    "SELECT COUNT(*) FROM search_chunks"
+                ).fetchone()[0]
                 if n_pages and not n_chunks:
-                    for row in conn.execute("SELECT url, title, body FROM pages").fetchall():
-                        self._replace_chunks(conn, row["url"], row["title"], row["body"])
+                    for row in conn.execute(
+                        "SELECT url, title, body FROM pages"
+                    ).fetchall():
+                        self._replace_chunks(
+                            conn, row["url"], row["title"], row["body"]
+                        )
                 conn.commit()
             finally:
                 conn.close()
 
     @staticmethod
-    def _replace_chunks(conn: sqlite3.Connection, url: str, title: str, body: str) -> None:
+    def _replace_chunks(
+        conn: sqlite3.Connection, url: str, title: str, body: str
+    ) -> None:
         conn.execute("DELETE FROM search_chunks WHERE url = ?", (url,))
         parts = _body_to_chunks(body)
         for i, ch in enumerate(parts):
@@ -455,14 +474,18 @@ class DocIndex:
                     "DELETE FROM search_chunks WHERE url IN (SELECT url FROM pages WHERE source_base = ?)",
                     (source_base,),
                 )
-                cur = conn.execute("DELETE FROM pages WHERE source_base = ?", (source_base,))
+                cur = conn.execute(
+                    "DELETE FROM pages WHERE source_base = ?", (source_base,)
+                )
                 deleted = cur.rowcount or 0
                 conn.commit()
                 return deleted
             finally:
                 conn.close()
 
-    def upsert_page(self, url: str, title: str, body: str, source_base: str, fetched_at: int) -> None:
+    def upsert_page(
+        self, url: str, title: str, body: str, source_base: str, fetched_at: int
+    ) -> None:
         with self._lock:
             conn = self._connect()
             try:

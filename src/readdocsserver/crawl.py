@@ -70,7 +70,11 @@ def canonical_page_url(url: str) -> str:
         path = path[: -len("index.html")]
     elif low == "/index.html":
         path = "/"
-    pairs = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True) if k.lower() != "highlight"]
+    pairs = [
+        (k, v)
+        for k, v in parse_qsl(p.query, keep_blank_values=True)
+        if k.lower() != "highlight"
+    ]
     query = urlencode(pairs)
     return urlunparse((p.scheme, p.netloc, path, p.params, query, ""))
 
@@ -142,8 +146,16 @@ async def discover_sitemap_seed_urls(
             continue
         ctype = resp.headers.get("content-type", "").lower()
         raw = resp.content.lstrip()
-        looks_like_sitemap = raw.startswith(b"<?xml") or raw.startswith(b"<urlset") or raw.startswith(b"<sitemapindex")
-        if "xml" not in ctype and not sm_url.lower().endswith(".xml") and not looks_like_sitemap:
+        looks_like_sitemap = (
+            raw.startswith(b"<?xml")
+            or raw.startswith(b"<urlset")
+            or raw.startswith(b"<sitemapindex")
+        )
+        if (
+            "xml" not in ctype
+            and not sm_url.lower().endswith(".xml")
+            and not looks_like_sitemap
+        ):
             continue
         pages, nested = _parse_sitemap_urls(resp.content)
         for n in nested:
@@ -224,7 +236,9 @@ _HEAD_RELS = frozenset(
 )
 
 
-def same_site_links(html: bytes, base_url: str, origin: str, path_prefix: str) -> list[str]:
+def same_site_links(
+    html: bytes, base_url: str, origin: str, path_prefix: str
+) -> list[str]:
     """Collect same-site doc URLs from anchors and Sphinx/RTD ``<link rel="...">`` navigation."""
     soup = BeautifulSoup(html, "html.parser")
     out: list[str] = []
@@ -335,7 +349,9 @@ async def crawl_readthedocs(
 
             ctype = resp.headers.get("content-type", "").lower()
             if resp.status_code >= 400:
-                stats["errors"].append({"url": fetch_url, "error": f"HTTP {resp.status_code}"})
+                stats["errors"].append(
+                    {"url": fetch_url, "error": f"HTTP {resp.status_code}"}
+                )
                 continue
             if "text/html" not in ctype and not fetch_url.endswith((".html", "/")):
                 stats["skipped"] += 1
@@ -352,7 +368,9 @@ async def crawl_readthedocs(
             if on_page:
                 await on_page(final_url, title, body, root, fetched_at)
 
-            for link in same_site_links(resp.content, str(resp.url), origin, path_prefix):
+            for link in same_site_links(
+                resp.content, str(resp.url), origin, path_prefix
+            ):
                 try_enqueue(link)
 
     return stats
