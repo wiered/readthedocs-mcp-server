@@ -37,3 +37,19 @@ class EntityHit:
     line_start: int | None = None
     line_end: int | None = None
     parent_entity_id: str | None = None
+
+
+@dataclass
+class EntityEdge:
+    edge_id: int | None
+    source_base: str
+    from_entity_id: str
+    to_entity_id: str
+    edge_type: str
+    source_kind: str
+    param_name: str = ""
+    confidence: float = 1.0
+    snippet: str = ""
+    page_url: str = ""
+    line_start: int | None = None
+    line_end: int | None = None

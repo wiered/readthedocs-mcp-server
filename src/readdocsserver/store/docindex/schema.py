@@ -71,6 +71,38 @@ CREATE INDEX IF NOT EXISTS idx_doc_entities_source ON doc_entities(source_base);
 CREATE INDEX IF NOT EXISTS idx_doc_entities_kind_name ON doc_entities(kind, name);
 CREATE INDEX IF NOT EXISTS idx_doc_entities_parent ON doc_entities(parent_entity_id);
 
+CREATE TABLE IF NOT EXISTS doc_entity_edges (
+    edge_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_base TEXT NOT NULL,
+    from_entity_id TEXT NOT NULL,
+    to_entity_id TEXT NOT NULL,
+    edge_type TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    param_name TEXT NOT NULL DEFAULT '',
+    confidence REAL NOT NULL DEFAULT 1.0,
+    snippet TEXT NOT NULL DEFAULT '',
+    page_url TEXT NOT NULL DEFAULT '',
+    line_start INTEGER,
+    line_end INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_doc_entity_edges_from
+ON doc_entity_edges(from_entity_id, edge_type);
+CREATE INDEX IF NOT EXISTS idx_doc_entity_edges_to
+ON doc_entity_edges(to_entity_id, edge_type);
+CREATE INDEX IF NOT EXISTS idx_doc_entity_edges_source
+ON doc_entity_edges(source_base);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_doc_entity_edges_unique
+ON doc_entity_edges(
+    from_entity_id,
+    to_entity_id,
+    edge_type,
+    source_kind,
+    param_name,
+    page_url,
+    COALESCE(line_start, -1),
+    COALESCE(line_end, -1)
+);
+
 CREATE TABLE IF NOT EXISTS doc_entity_params (
     entity_id TEXT NOT NULL,
     ord INTEGER NOT NULL,

@@ -77,6 +77,10 @@ class DocIndex:
                     (source_base,),
                 )
                 conn.execute(
+                    "DELETE FROM doc_entity_edges WHERE source_base = ?",
+                    (source_base,),
+                )
+                conn.execute(
                     "DELETE FROM doc_entities WHERE source_base = ?", (source_base,)
                 )
                 conn.execute(

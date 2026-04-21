@@ -8,7 +8,7 @@ from typing import Any
 from ..chunking import _body_to_chunks_with_lines
 from ..entity_fts import _entity_fts_body_text
 from ..snippets import _approx_line_in_body, _context_line_info_from_chunk
-from ..types import EntityHit, SearchHit
+from ..types import EntityEdge, EntityHit, SearchHit
 
 
 def replace_chunks(conn: sqlite3.Connection, url: str, title: str, body: str) -> None:
@@ -24,7 +24,125 @@ def replace_chunks(conn: sqlite3.Connection, url: str, title: str, body: str) ->
         )
 
 
+def _entity_edge_from_row(row: sqlite3.Row) -> EntityEdge:
+    return EntityEdge(
+        edge_id=row["edge_id"],
+        source_base=row["source_base"],
+        from_entity_id=row["from_entity_id"],
+        to_entity_id=row["to_entity_id"],
+        edge_type=row["edge_type"],
+        source_kind=row["source_kind"],
+        param_name=row["param_name"],
+        confidence=float(row["confidence"]),
+        snippet=row["snippet"],
+        page_url=row["page_url"],
+        line_start=row["line_start"],
+        line_end=row["line_end"],
+    )
+
+
+def delete_edges_for_page(conn: sqlite3.Connection, url: str) -> None:
+    conn.execute("DELETE FROM doc_entity_edges WHERE page_url = ?", (url,))
+    conn.execute(
+        "DELETE FROM doc_entity_edges WHERE from_entity_id IN "
+        "(SELECT entity_id FROM doc_entities WHERE page_url = ?)",
+        (url,),
+    )
+
+
+def _delete_stale_incoming_edges(
+    conn: sqlite3.Connection, old_entity_ids: list[str], new_entity_ids: list[str]
+) -> None:
+    stale_ids = sorted(set(old_entity_ids) - set(new_entity_ids))
+    for entity_id in stale_ids:
+        conn.execute(
+            "DELETE FROM doc_entity_edges WHERE to_entity_id = ?",
+            (entity_id,),
+        )
+
+
+def replace_edges(
+    conn: sqlite3.Connection,
+    url: str,
+    source_base: str,
+    edges: list[EntityEdge],
+) -> None:
+    delete_edges_for_page(conn, url)
+    for edge in edges:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO doc_entity_edges(
+                source_base, from_entity_id, to_entity_id, edge_type, source_kind,
+                param_name, confidence, snippet, page_url, line_start, line_end
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_base,
+                edge.from_entity_id,
+                edge.to_entity_id,
+                edge.edge_type,
+                edge.source_kind,
+                edge.param_name,
+                edge.confidence,
+                edge.snippet,
+                url,
+                edge.line_start,
+                edge.line_end,
+            ),
+        )
+
+
+def entity_edges(
+    conn: sqlite3.Connection,
+    entity_id: str,
+    direction: str = "out",
+    edge_type: str | None = None,
+    limit: int = 50,
+) -> list[EntityEdge]:
+    if direction not in {"out", "in"}:
+        raise ValueError("direction must be 'out' or 'in'")
+    limit = max(1, min(limit, 500))
+    column = "from_entity_id" if direction == "out" else "to_entity_id"
+    edge_filter = " AND edge_type = ?" if edge_type is not None else ""
+    args: list[Any] = [entity_id]
+    if edge_type is not None:
+        args.append(edge_type)
+    args.append(limit)
+    rows = conn.execute(
+        f"""
+        SELECT edge_id, source_base, from_entity_id, to_entity_id, edge_type,
+               source_kind, param_name, confidence, snippet, page_url, line_start,
+               line_end
+        FROM doc_entity_edges
+        WHERE {column} = ?{edge_filter}
+        ORDER BY edge_type, source_kind, to_entity_id, from_entity_id, edge_id
+        LIMIT ?
+        """,
+        args,
+    ).fetchall()
+    return [_entity_edge_from_row(row) for row in rows]
+
+
+def entity_edges_between(
+    conn: sqlite3.Connection, from_entity_id: str, to_entity_id: str
+) -> list[EntityEdge]:
+    rows = conn.execute(
+        """
+        SELECT edge_id, source_base, from_entity_id, to_entity_id, edge_type,
+               source_kind, param_name, confidence, snippet, page_url, line_start,
+               line_end
+        FROM doc_entity_edges
+        WHERE from_entity_id = ? AND to_entity_id = ?
+        ORDER BY edge_type, source_kind, param_name, edge_id
+        """,
+        (from_entity_id, to_entity_id),
+    ).fetchall()
+    return [_entity_edge_from_row(row) for row in rows]
+
+
 def delete_entities_for_page(conn: sqlite3.Connection, url: str) -> None:
+    delete_edges_for_page(conn, url)
     entity_rows = conn.execute(
         "SELECT entity_id FROM doc_entities WHERE page_url = ?", (url,)
     ).fetchall()
@@ -87,7 +205,10 @@ def replace_entities(
     source_base: str,
     entities: list[dict[str, Any]],
 ) -> None:
-    delete_entities_for_page(conn, url)
+    old_rows = conn.execute(
+        "SELECT entity_id FROM doc_entities WHERE page_url = ?", (url,)
+    ).fetchall()
+    old_entity_ids = [row["entity_id"] for row in old_rows]
     local_to_entity: dict[str, str] = {}
     entity_ids: list[str] = []
     for i, entity in enumerate(entities):
@@ -97,6 +218,9 @@ def replace_entities(
         if local_id:
             local_to_entity[local_id] = entity_id
         entity_ids.append(entity_id)
+
+    delete_entities_for_page(conn, url)
+    _delete_stale_incoming_edges(conn, old_entity_ids, entity_ids)
 
     for i, entity in enumerate(entities):
         entity_id = entity_ids[i]
