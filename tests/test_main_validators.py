@@ -54,6 +54,10 @@ def test_validate_symbol_name() -> None:
 def test_optional_edge_types() -> None:
     assert main._optional_edge_types(None) is None
     assert main._optional_edge_types(["returns", " returns ", ""]) == ["returns"]
+    assert main._optional_edge_types(["see_also", "requires"]) == [
+        "see_also",
+        "requires",
+    ]
     with pytest.raises(ValueError, match="Unsupported edge_type"):
         main._optional_edge_types(["related_to"])
 
@@ -271,6 +275,11 @@ def test_related_symbols_model_conversion() -> None:
                     "source_kind": "signature",
                     "param_name": "",
                     "confidence": 1.0,
+                    "snippet": "copy() -> pkg.Message",
+                    "source_page_url": "https://docs.example/api.html",
+                    "line_start": 12,
+                    "line_end": 12,
+                    "relation_label": "returned_by",
                     "target": {
                         "entity_id": "https://docs.example/api.html#pkg.Service.send",
                         "qualname": "pkg.Service.send",
@@ -287,4 +296,24 @@ def test_related_symbols_model_conversion() -> None:
     assert response.symbol is not None
     assert response.symbol.qualname == "pkg.Message"
     assert response.edges[0].direction == "in"
+    assert response.edges[0].relation_label == "returned_by"
+    assert response.edges[0].snippet == "copy() -> pkg.Message"
     assert response.edges[0].target.qualname == "pkg.Service.send"
+
+
+def test_symbol_graph_stats_model_conversion() -> None:
+    stats = main.SymbolGraphStatsResponse.model_validate(
+        {
+            "source_base": "https://docs.example/",
+            "edge_type_counts": {"references": 2},
+            "source_kind_counts": {"xref": 2},
+            "unresolved_xref_target_count": 1,
+            "top_unresolved_targets": [{"target": "Missing", "count": 1}],
+            "stale_edge_count": 0,
+            "total_entities": 3,
+            "total_pages": 1,
+        }
+    )
+
+    assert stats.edge_type_counts["references"] == 2
+    assert stats.top_unresolved_targets[0]["target"] == "Missing"

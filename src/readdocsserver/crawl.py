@@ -215,7 +215,7 @@ def extract_structured_entities(
     _ = page_url
     main = _find_main_content(soup)
     rendered_body = body if body is not None else _render_text_blocks(main)
-    entities = _extract_py_entities(main)
+    entities = _extract_py_entities(main, page_url)
     _attach_body_lines(entities, rendered_body)
     return entities
 
@@ -494,7 +494,7 @@ _VERSION_RE = re.compile(
 )
 
 
-def _extract_py_entities(root: Tag) -> list[dict]:
+def _extract_py_entities(root: Tag, page_url: str) -> list[dict]:
     entities: list[dict] = []
 
     def walk(node: Tag, parent_local_id: str | None) -> None:
@@ -502,7 +502,9 @@ def _extract_py_entities(root: Tag) -> list[dict]:
             if not isinstance(child, Tag):
                 continue
             if _is_py_object(child):
-                entity = _entity_from_py_object(child, parent_local_id, len(entities))
+                entity = _entity_from_py_object(
+                    child, parent_local_id, len(entities), page_url
+                )
                 current_parent = parent_local_id
                 if entity is not None:
                     entities.append(entity)
@@ -517,7 +519,7 @@ def _extract_py_entities(root: Tag) -> list[dict]:
 
 
 def _entity_from_py_object(
-    dl: Tag, parent_local_id: str | None, ordinal: int
+    dl: Tag, parent_local_id: str | None, ordinal: int, page_url: str
 ) -> dict | None:
     kind = _py_object_kind(dl)
     if kind is None:
@@ -550,6 +552,7 @@ def _entity_from_py_object(
         "line_end": None,
         "params": _extract_entity_params(sig, dds),
         "notes": _extract_entity_notes(dds),
+        "xrefs": _extract_entity_xrefs(sig, dds, page_url),
     }
 
 
@@ -732,6 +735,94 @@ def _extract_entity_notes(dds: list[Tag]) -> list[dict]:
                     }
                 )
     return notes
+
+
+def _extract_entity_xrefs(sig: Tag, dds: list[Tag], page_url: str) -> list[dict]:
+    xrefs: list[dict] = []
+    for container in [sig, *dds]:
+        for link in container.find_all("a", href=True):
+            if "headerlink" in link.get("class", []):
+                continue
+            target_url, target_anchor = _xref_target(str(link["href"]), page_url)
+            if not target_anchor:
+                continue
+            snippet = _xref_snippet(link)
+            edge_type = _xref_edge_type(link)
+            xrefs.append(
+                {
+                    "edge_type": edge_type,
+                    "source_kind": "xref",
+                    "target_url": target_url,
+                    "target_anchor": target_anchor,
+                    "target_name": _inline_text(link, compact=True),
+                    "snippet": snippet,
+                    "confidence": 1.0,
+                }
+            )
+    return _dedupe_xrefs(xrefs)
+
+
+def _xref_target(href: str, page_url: str) -> tuple[str, str]:
+    joined = urljoin(page_url, href)
+    page_part, fragment = urldefrag(joined)
+    return canonical_page_url(page_part), fragment.strip()
+
+
+def _xref_snippet(link: Tag) -> str:
+    parent = link.parent if isinstance(link.parent, Tag) else link
+    text = _inline_text(parent)
+    if not text:
+        text = _inline_text(link, compact=True)
+    return text[:300]
+
+
+def _xref_edge_type(link: Tag) -> str:
+    parent = link.parent
+    in_note = False
+    in_warning = False
+    while isinstance(parent, Tag):
+        classes = set(parent.get("class", []))
+        if "warning" in classes:
+            in_warning = True
+        if classes & {"note", "admonition", "versionadded", "versionchanged"}:
+            in_note = True
+        if _is_see_also_context(parent):
+            return "see_also"
+        parent = parent.parent
+    if in_warning:
+        return "mentioned_in_warning"
+    if in_note:
+        return "mentioned_in_note"
+    return "references"
+
+
+def _is_see_also_context(tag: Tag) -> bool:
+    text = _inline_text(tag)
+    if text.lower().startswith("see also"):
+        return True
+    previous = tag.find_previous_sibling()
+    if isinstance(previous, Tag):
+        label = _inline_text(previous).rstrip(":").lower()
+        return label == "see also"
+    return False
+
+
+def _dedupe_xrefs(xrefs: list[dict]) -> list[dict]:
+    seen: set[tuple[str, str, str, str, str]] = set()
+    out: list[dict] = []
+    for xref in xrefs:
+        key = (
+            str(xref.get("edge_type") or ""),
+            str(xref.get("target_url") or ""),
+            str(xref.get("target_anchor") or ""),
+            str(xref.get("target_name") or ""),
+            str(xref.get("snippet") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(xref)
+    return out
 
 
 def _has_structural_note_ancestor(node: Tag, boundary: Tag) -> bool:

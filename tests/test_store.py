@@ -699,6 +699,19 @@ def test_related_symbols_returns_outgoing_incoming_and_filters(
     assert incoming_params["edges"][0]["param_name"] == "view"
     assert incoming_params["edges"][0]["target"]["qualname"] == "pkg.Message.edit"
 
+    plain_lookup = idx.lookup_symbol("https://docs.example/", "pkg.Message")
+    related_lookup = idx.lookup_symbol(
+        "https://docs.example/", "pkg.Message", include_related=True
+    )
+
+    assert "related" not in plain_lookup
+    assert related_lookup["related"]["out"]
+    assert related_lookup["related"]["in"]
+    assert any(
+        edge["relation_label"] == "returned_by"
+        for edge in related_lookup["related"]["in"]
+    )
+
 
 def test_related_symbols_not_found(tmp_path: Path) -> None:
     idx = DocIndex(tmp_path / "db.sqlite")

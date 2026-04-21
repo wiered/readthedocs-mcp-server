@@ -6,7 +6,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
@@ -103,6 +103,7 @@ class EntityResult(BaseModel):
     line_start: int | None = None
     line_end: int | None = None
     parent_entity_id: str | None = None
+    related: dict[str, Any] | None = None
 
 
 class EntitySearchResponse(BaseModel):
@@ -151,6 +152,7 @@ class SymbolLookupResult(BaseModel):
     context: str = ""
     summary: str = ""
     entity_id: str | None = None
+    related: dict[str, Any] | None = None
 
 
 class LookupSymbolResponse(BaseModel):
@@ -177,6 +179,11 @@ class RelatedSymbolEdge(BaseModel):
     source_kind: str
     param_name: str = ""
     confidence: float
+    snippet: str = ""
+    source_page_url: str = ""
+    line_start: int | None = None
+    line_end: int | None = None
+    relation_label: str = ""
     target: RelatedSymbolRef
 
 
@@ -186,6 +193,19 @@ class RelatedSymbolsResponse(BaseModel):
     found: bool
     symbol: RelatedSymbolRef | None = None
     edges: list[RelatedSymbolEdge] = Field(default_factory=list)
+
+
+class SymbolGraphStatsResponse(BaseModel):
+    """Diagnostic statistics for the stored symbol graph."""
+
+    source_base: str
+    edge_type_counts: dict[str, int] = Field(default_factory=dict)
+    source_kind_counts: dict[str, int] = Field(default_factory=dict)
+    unresolved_xref_target_count: int
+    top_unresolved_targets: list[dict[str, Any]] = Field(default_factory=list)
+    stale_edge_count: int
+    total_entities: int
+    total_pages: int
 
 
 class FetchMetadata(BaseModel):
@@ -324,6 +344,14 @@ _VALID_EDGE_TYPES = {
     "returns",
     "accepts_parameter_type",
     "references",
+    "see_also",
+    "mentioned_in_note",
+    "mentioned_in_warning",
+    "only_valid_in",
+    "requires",
+    "use_instead",
+    "similar_to",
+    "converts_to",
 }
 
 
@@ -424,6 +452,33 @@ def _entity_result_from_hit(hit) -> EntityResult:
     )
 
 
+def _entity_result_from_hit_with_related(
+    idx: DocIndex, hit, source_base: str | None
+) -> EntityResult:
+    result = _entity_result_from_hit(hit)
+    if source_base:
+        related = idx.related_symbols(
+            source_base,
+            hit.qualname,
+            direction="both",
+            limit=30,
+        )
+        if related.get("found"):
+            result.related = {
+                "out": [
+                    edge
+                    for edge in related.get("edges", [])
+                    if edge.get("direction") == "out"
+                ],
+                "in": [
+                    edge
+                    for edge in related.get("edges", [])
+                    if edge.get("direction") == "in"
+                ],
+            }
+    return result
+
+
 def _entity_detail_from_dict(data: dict) -> EntityDetail:
     methods = [
         _entity_detail_from_dict(method)
@@ -493,6 +548,7 @@ def create_server() -> FastMCP:
             request_delay_sec=validated_delay,
             on_page=on_page,
         )
+        idx.rebuild_graph_for_source(root)
         return IndexStats.model_validate({**stats, "db_path": str(idx.db_path)})
 
     @mcp.tool()
@@ -532,32 +588,43 @@ def create_server() -> FastMCP:
         kind: str | None = None,
         source_base: str | None = None,
         limit: int = 15,
+        include_related: bool = False,
     ) -> EntitySearchResponse:
         """Search structured docs entities such as Sphinx classes and methods."""
         stripped_query = query.strip()
         if not stripped_query:
             raise ValueError("query must not be empty")
         idx = _index()
+        scoped_source = _optional_source_base(source_base)
         hits = idx.search_entities(
             stripped_query,
             limit=_validate_limit(limit),
             kind=_optional_entity_kind(kind),
-            source_base=_optional_source_base(source_base),
+            source_base=scoped_source,
         )
+        if include_related:
+            results = [
+                _entity_result_from_hit_with_related(idx, hit, scoped_source)
+                for hit in hits
+            ]
+        else:
+            results = [_entity_result_from_hit(hit) for hit in hits]
         return EntitySearchResponse(
-            results=[_entity_result_from_hit(hit) for hit in hits]
+            results=results
         )
 
     @mcp.tool()
     async def lookup_symbol(
         source_base: str,
         symbol_name: str,
+        include_related: bool = False,
     ) -> LookupSymbolResponse:
         """Find one structured Sphinx/Python symbol and return page, anchor, lines, and short context."""
         idx = _index()
         result = idx.lookup_symbol(
             _optional_source_base(source_base) or "",
             _validate_symbol_name(symbol_name),
+            include_related=include_related,
         )
         return LookupSymbolResponse(result=SymbolLookupResult.model_validate(result))
 
@@ -579,6 +646,13 @@ def create_server() -> FastMCP:
             limit=_validate_limit(limit),
         )
         return RelatedSymbolsResponse.model_validate(result)
+
+    @mcp.tool()
+    async def get_symbol_graph_stats(source_base: str) -> SymbolGraphStatsResponse:
+        """Return diagnostic counts for symbol graph edges and unresolved links."""
+        idx = _index()
+        result = idx.symbol_graph_stats(_optional_source_base(source_base) or "")
+        return SymbolGraphStatsResponse.model_validate(result)
 
     @mcp.tool()
     async def get_entity(

@@ -53,3 +53,19 @@ class EntityEdge:
     page_url: str = ""
     line_start: int | None = None
     line_end: int | None = None
+
+
+@dataclass
+class EntityXrefCandidate:
+    source_base: str
+    page_url: str
+    from_entity_id: str
+    edge_type: str
+    source_kind: str
+    target_url: str = ""
+    target_anchor: str = ""
+    target_name: str = ""
+    snippet: str = ""
+    confidence: float = 1.0
+    line_start: int | None = None
+    line_end: int | None = None

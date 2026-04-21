@@ -103,6 +103,38 @@ ON doc_entity_edges(
     COALESCE(line_end, -1)
 );
 
+CREATE TABLE IF NOT EXISTS doc_entity_xref_candidates (
+    candidate_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_base TEXT NOT NULL,
+    page_url TEXT NOT NULL,
+    from_entity_id TEXT NOT NULL,
+    edge_type TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    target_url TEXT NOT NULL DEFAULT '',
+    target_anchor TEXT NOT NULL DEFAULT '',
+    target_name TEXT NOT NULL DEFAULT '',
+    snippet TEXT NOT NULL DEFAULT '',
+    confidence REAL NOT NULL DEFAULT 1.0,
+    line_start INTEGER,
+    line_end INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_doc_entity_xref_candidates_page
+ON doc_entity_xref_candidates(page_url);
+CREATE INDEX IF NOT EXISTS idx_doc_entity_xref_candidates_source
+ON doc_entity_xref_candidates(source_base);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_doc_entity_xref_candidates_unique
+ON doc_entity_xref_candidates(
+    from_entity_id,
+    edge_type,
+    source_kind,
+    target_url,
+    target_anchor,
+    target_name,
+    snippet,
+    COALESCE(line_start, -1),
+    COALESCE(line_end, -1)
+);
+
 CREATE TABLE IF NOT EXISTS doc_entity_params (
     entity_id TEXT NOT NULL,
     ord INTEGER NOT NULL,

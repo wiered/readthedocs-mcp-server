@@ -12,17 +12,20 @@ from ..fts_query import _fts_match_stages
 from ..jsonutil import _json_list
 from ..paths import default_db_path
 from ..symbol_lookup import _empty_symbol_lookup, _symbol_lookup_from_row
-from ..types import EntityHit, SearchHit
-from ..entity_edges import build_edges_for_page
+from ..types import EntityHit, EntityXrefCandidate, SearchHit
+from ..entity_edges import build_edges_for_page, build_text_inference_candidates
 from .operations import (
     child_methods,
     entity_edges,
     entity_notes,
     entity_params,
     get_entity_row,
+    rebuild_resolved_candidate_edges,
     replace_chunks,
     replace_edges,
     replace_entities,
+    replace_xref_candidates,
+    resolved_candidate_edges,
     search_chunks_fts,
     search_entities_fts,
 )
@@ -84,6 +87,10 @@ class DocIndex:
                     (source_base,),
                 )
                 conn.execute(
+                    "DELETE FROM doc_entity_xref_candidates WHERE source_base = ?",
+                    (source_base,),
+                )
+                conn.execute(
                     "DELETE FROM doc_entities WHERE source_base = ?", (source_base,)
                 )
                 conn.execute(
@@ -128,9 +135,63 @@ class DocIndex:
                     (url, title, body, source_base, fetched_at, toc_json),
                 )
                 replace_chunks(conn, url, title, body)
-                replace_entities(conn, url, source_base, entities or [])
+                local_to_entity = replace_entities(
+                    conn, url, source_base, entities or []
+                )
+                xref_candidates = self._xref_candidates_from_entities(
+                    url, source_base, entities or [], local_to_entity
+                )
+                xref_candidates.extend(
+                    build_text_inference_candidates(conn, source_base, url)
+                )
+                replace_xref_candidates(conn, url, source_base, xref_candidates)
                 edges = build_edges_for_page(conn, source_base, url)
+                edges.extend(resolved_candidate_edges(conn, source_base, page_url=url))
                 replace_edges(conn, url, source_base, edges)
+                conn.commit()
+            finally:
+                conn.close()
+
+    def _xref_candidates_from_entities(
+        self,
+        url: str,
+        source_base: str,
+        entities: list[dict[str, Any]],
+        local_to_entity: dict[str, str],
+    ) -> list[EntityXrefCandidate]:
+        candidates: list[EntityXrefCandidate] = []
+        for entity in entities:
+            local_id = str(entity.get("local_id") or "")
+            from_entity_id = local_to_entity.get(local_id)
+            if from_entity_id is None:
+                continue
+            line_start = entity.get("line_start")
+            line_end = entity.get("line_end")
+            for xref in entity.get("xrefs") or []:
+                candidates.append(
+                    EntityXrefCandidate(
+                        source_base=source_base,
+                        page_url=url,
+                        from_entity_id=from_entity_id,
+                        edge_type=str(xref.get("edge_type") or "references"),
+                        source_kind=str(xref.get("source_kind") or "xref"),
+                        target_url=str(xref.get("target_url") or ""),
+                        target_anchor=str(xref.get("target_anchor") or ""),
+                        target_name=str(xref.get("target_name") or ""),
+                        snippet=str(xref.get("snippet") or ""),
+                        confidence=float(xref.get("confidence") or 1.0),
+                        line_start=line_start,
+                        line_end=line_end,
+                    )
+                )
+        return candidates
+
+    def rebuild_graph_for_source(self, source_base: str) -> None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                rebuild_resolved_candidate_edges(conn, source_base)
                 conn.commit()
             finally:
                 conn.close()
@@ -308,7 +369,9 @@ class DocIndex:
             include_notes=include_notes,
         )
 
-    def lookup_symbol(self, source_base: str, symbol_name: str) -> dict[str, Any]:
+    def lookup_symbol(
+        self, source_base: str, symbol_name: str, *, include_related: bool = False
+    ) -> dict[str, Any]:
         symbol = symbol_name.strip()
         if not symbol:
             return _empty_symbol_lookup(symbol)
@@ -339,7 +402,12 @@ class DocIndex:
                     (source_base, symbol, symbol, symbol, symbol, symbol),
                 ).fetchone()
                 if row is not None:
-                    return _symbol_lookup_from_row(row, row["page_body"])
+                    result = _symbol_lookup_from_row(row, row["page_body"])
+                    if include_related:
+                        result["related"] = self._compact_related(
+                            conn, str(row["entity_id"])
+                        )
+                    return result
             finally:
                 conn.close()
 
@@ -364,7 +432,12 @@ class DocIndex:
                 ).fetchone()
                 if row is None:
                     return _empty_symbol_lookup(symbol)
-                return _symbol_lookup_from_row(row, row["page_body"])
+                result = _symbol_lookup_from_row(row, row["page_body"])
+                if include_related:
+                    result["related"] = self._compact_related(
+                        conn, str(row["entity_id"])
+                    )
+                return result
             finally:
                 conn.close()
 
@@ -408,7 +481,7 @@ class DocIndex:
                     ],
                 )
                 edges = []
-                for edge in edge_rows:
+                for edge in _sort_related_edges(edge_rows):
                     related_id = (
                         str(edge.to_entity_id)
                         if edge.direction == "out"
@@ -424,10 +497,149 @@ class DocIndex:
                             "source_kind": edge.source_kind,
                             "param_name": edge.param_name,
                             "confidence": edge.confidence,
+                            "snippet": edge.snippet,
+                            "source_page_url": edge.page_url,
+                            "line_start": edge.line_start,
+                            "line_end": edge.line_end,
+                            "relation_label": _relation_label(
+                                edge.edge_type, edge.direction
+                            ),
                             "target": target,
                         }
                     )
                 return {"found": True, "symbol": symbol_ref, "edges": edges}
+            finally:
+                conn.close()
+
+    def symbol_graph_stats(self, source_base: str) -> dict[str, Any]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                edge_type_counts = {
+                    str(row["edge_type"]): int(row["n"])
+                    for row in conn.execute(
+                        """
+                        SELECT edge_type, COUNT(*) AS n
+                        FROM doc_entity_edges
+                        WHERE source_base = ?
+                        GROUP BY edge_type
+                        ORDER BY edge_type
+                        """,
+                        (source_base,),
+                    ).fetchall()
+                }
+                source_kind_counts = {
+                    str(row["source_kind"]): int(row["n"])
+                    for row in conn.execute(
+                        """
+                        SELECT source_kind, COUNT(*) AS n
+                        FROM doc_entity_edges
+                        WHERE source_base = ?
+                        GROUP BY source_kind
+                        ORDER BY source_kind
+                        """,
+                        (source_base,),
+                    ).fetchall()
+                }
+                unresolved = conn.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM doc_entity_xref_candidates AS c
+                    WHERE c.source_base = ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM doc_entities AS target
+                          WHERE target.source_base = c.source_base
+                            AND (
+                                (c.target_url = '' AND c.target_anchor != ''
+                                    AND target.anchor = c.target_anchor)
+                                OR (c.target_url != '' AND c.target_anchor != ''
+                                    AND target.page_url = c.target_url
+                                    AND target.anchor = c.target_anchor)
+                                OR (c.target_name != ''
+                                    AND target.qualname = c.target_name)
+                                OR (c.target_name != ''
+                                    AND target.name = c.target_name
+                                    AND 1 = (
+                                        SELECT COUNT(*) FROM doc_entities AS unique_name
+                                        WHERE unique_name.source_base = c.source_base
+                                          AND unique_name.name = c.target_name
+                                    ))
+                            )
+                      )
+                    """,
+                    (source_base,),
+                ).fetchone()
+                top_unresolved = [
+                    {
+                        "target": row["target"],
+                        "count": int(row["n"]),
+                    }
+                    for row in conn.execute(
+                        """
+                        SELECT COALESCE(NULLIF(target_anchor, ''), target_name, target_url)
+                               AS target,
+                               COUNT(*) AS n
+                        FROM doc_entity_xref_candidates AS c
+                        WHERE c.source_base = ?
+                          AND NOT EXISTS (
+                              SELECT 1 FROM doc_entities AS target
+                              WHERE target.source_base = c.source_base
+                                AND (
+                                    (c.target_url = '' AND c.target_anchor != ''
+                                        AND target.anchor = c.target_anchor)
+                                    OR (c.target_url != '' AND c.target_anchor != ''
+                                        AND target.page_url = c.target_url
+                                        AND target.anchor = c.target_anchor)
+                                    OR (c.target_name != ''
+                                        AND target.qualname = c.target_name)
+                                    OR (c.target_name != ''
+                                        AND target.name = c.target_name
+                                        AND 1 = (
+                                            SELECT COUNT(*)
+                                            FROM doc_entities AS unique_name
+                                            WHERE unique_name.source_base = c.source_base
+                                              AND unique_name.name = c.target_name
+                                        ))
+                                )
+                          )
+                        GROUP BY target
+                        ORDER BY n DESC, target
+                        LIMIT 20
+                        """,
+                        (source_base,),
+                    ).fetchall()
+                ]
+                stale = conn.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM doc_entity_edges AS edge
+                    LEFT JOIN doc_entities AS source
+                      ON source.entity_id = edge.from_entity_id
+                    LEFT JOIN doc_entities AS target
+                      ON target.entity_id = edge.to_entity_id
+                    WHERE edge.source_base = ?
+                      AND (source.entity_id IS NULL OR target.entity_id IS NULL)
+                    """,
+                    (source_base,),
+                ).fetchone()
+                entities = conn.execute(
+                    "SELECT COUNT(*) AS n FROM doc_entities WHERE source_base = ?",
+                    (source_base,),
+                ).fetchone()
+                pages = conn.execute(
+                    "SELECT COUNT(*) AS n FROM pages WHERE source_base = ?",
+                    (source_base,),
+                ).fetchone()
+                return {
+                    "source_base": source_base,
+                    "edge_type_counts": edge_type_counts,
+                    "source_kind_counts": source_kind_counts,
+                    "unresolved_xref_target_count": int(unresolved["n"]),
+                    "top_unresolved_targets": top_unresolved,
+                    "stale_edge_count": int(stale["n"]),
+                    "total_entities": int(entities["n"]),
+                    "total_pages": int(pages["n"]),
+                }
             finally:
                 conn.close()
 
@@ -496,6 +708,47 @@ class DocIndex:
                     if len(rows) >= limit:
                         return rows
         return rows
+
+    def _compact_related(
+        self, conn: sqlite3.Connection, entity_id: str, limit: int = 30
+    ) -> dict[str, list[dict[str, Any]]]:
+        edges = self._related_edge_rows(
+            conn, entity_id, edge_types=None, direction="both", limit=limit
+        )
+        refs = self._entity_refs_by_id(
+            conn,
+            [
+                str(edge.to_entity_id)
+                if edge.direction == "out"
+                else str(edge.from_entity_id)
+                for edge in edges
+            ],
+        )
+        out: dict[str, list[dict[str, Any]]] = {"out": [], "in": []}
+        for edge in _sort_related_edges(edges):
+            related_id = (
+                str(edge.to_entity_id)
+                if edge.direction == "out"
+                else str(edge.from_entity_id)
+            )
+            target = refs.get(related_id)
+            if target is None:
+                continue
+            out[edge.direction].append(
+                {
+                    "edge_type": edge.edge_type,
+                    "relation_label": _relation_label(edge.edge_type, edge.direction),
+                    "source_kind": edge.source_kind,
+                    "confidence": edge.confidence,
+                    "param_name": edge.param_name,
+                    "snippet": edge.snippet,
+                    "source_page_url": edge.page_url,
+                    "line_start": edge.line_start,
+                    "line_end": edge.line_end,
+                    "target": target,
+                }
+            )
+        return out
 
     def _entity_refs_by_id(
         self, conn: sqlite3.Connection, entity_ids: list[str]
@@ -625,6 +878,10 @@ class _DirectedEdge:
         self.source_kind = edge.source_kind
         self.param_name = edge.param_name
         self.confidence = edge.confidence
+        self.snippet = edge.snippet
+        self.page_url = edge.page_url
+        self.line_start = edge.line_start
+        self.line_end = edge.line_end
 
 
 def _symbol_ref_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -635,3 +892,32 @@ def _symbol_ref_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "page_url": row["page_url"],
         "anchor": row["anchor"],
     }
+
+
+def _relation_label(edge_type: str, direction: str) -> str:
+    if direction == "in":
+        return {
+            "returns": "returned_by",
+            "accepts_parameter_type": "used_by",
+            "has_method": "method_of",
+        }.get(edge_type, edge_type)
+    return edge_type
+
+
+def _sort_related_edges(edges: list[_DirectedEdge]) -> list[_DirectedEdge]:
+    source_rank = {"structure": 0, "signature": 0, "xref": 1, "text_inference": 2}
+    return sorted(
+        edges,
+        key=lambda edge: (
+            source_rank.get(edge.source_kind, 9),
+            -edge.confidence,
+            len(
+                str(
+                    edge.to_entity_id
+                    if edge.direction == "out"
+                    else edge.from_entity_id
+                )
+            ),
+            edge.edge_type,
+        ),
+    )

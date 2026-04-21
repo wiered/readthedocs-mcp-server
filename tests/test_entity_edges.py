@@ -43,6 +43,7 @@ def _entity(qualname: str, *, anchor: str | None = None) -> dict:
         "line_end": 1,
         "params": [],
         "notes": [],
+        "xrefs": [],
     }
 
 
@@ -68,6 +69,7 @@ def _method(
         "line_end": 3,
         "params": params or [],
         "notes": [],
+        "xrefs": [],
     }
 
 
@@ -429,3 +431,117 @@ def test_upsert_page_links_to_entity_from_other_page_same_source(
 
     assert len(edges) == 1
     assert edges[0].to_entity_id == f"{msg_url}#pkg.Message"
+
+
+def test_upsert_page_creates_xref_edges_and_ignores_page_only_links(
+    tmp_path: Path,
+) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    url = "https://docs.example/api.html"
+    source = _entity("pkg.Source")
+    source["xrefs"] = [
+        {
+            "edge_type": "see_also",
+            "source_kind": "xref",
+            "target_url": url,
+            "target_anchor": "pkg.Target",
+            "target_name": "Target",
+            "snippet": "See also Target.",
+        },
+        {
+            "edge_type": "references",
+            "source_kind": "xref",
+            "target_url": "https://docs.example/guide.html",
+            "target_anchor": "",
+            "target_name": "",
+            "snippet": "Guide page.",
+        },
+    ]
+    idx.upsert_page(
+        url,
+        "API",
+        "Source\nTarget",
+        SOURCE_BASE,
+        1,
+        [source, _entity("pkg.Target")],
+    )
+
+    with _connect(idx.db_path) as conn:
+        edges = entity_edges(conn, f"{url}#pkg.Source", direction="out")
+
+    assert [(edge.edge_type, edge.to_entity_id) for edge in edges] == [
+        ("see_also", f"{url}#pkg.Target")
+    ]
+    assert edges[0].source_kind == "xref"
+    assert edges[0].snippet == "See also Target."
+
+
+def test_rebuild_graph_for_source_resolves_late_xref_target(tmp_path: Path) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    ref_url = "https://docs.example/ref.html"
+    target_url = "https://docs.example/target.html"
+    source = _entity("pkg.Source")
+    source["xrefs"] = [
+        {
+            "edge_type": "references",
+            "source_kind": "xref",
+            "target_url": target_url,
+            "target_anchor": "pkg.Target",
+            "target_name": "Target",
+            "snippet": "Later target.",
+        }
+    ]
+    idx.upsert_page(ref_url, "Ref", "Source", SOURCE_BASE, 1, [source])
+    idx.upsert_page(
+        target_url, "Target", "Target", SOURCE_BASE, 1, [_entity("pkg.Target")]
+    )
+
+    with _connect(idx.db_path) as conn:
+        before = entity_edges(conn, f"{ref_url}#pkg.Source", direction="out")
+
+    idx.rebuild_graph_for_source(SOURCE_BASE)
+
+    with _connect(idx.db_path) as conn:
+        after = entity_edges(conn, f"{ref_url}#pkg.Source", direction="out")
+
+    assert before == []
+    assert len(after) == 1
+    assert after[0].to_entity_id == f"{target_url}#pkg.Target"
+
+
+def test_text_inference_edges_resolve_known_targets(tmp_path: Path) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    url = "https://docs.example/api.html"
+    source = _entity("pkg.Action")
+    source["body_text"] = (
+        "This can only be used in Guild. You must be used with Client. "
+        "Use Replacement instead. Similar to Sibling. It is converted to Message."
+    )
+    idx.upsert_page(
+        url,
+        "API",
+        "Action\nGuild\nClient\nReplacement\nSibling\nMessage",
+        SOURCE_BASE,
+        1,
+        [
+            source,
+            _entity("pkg.Guild"),
+            _entity("pkg.Client"),
+            _entity("pkg.Replacement"),
+            _entity("pkg.Sibling"),
+            _entity("pkg.Message"),
+        ],
+    )
+
+    with _connect(idx.db_path) as conn:
+        edges = entity_edges(conn, f"{url}#pkg.Action", direction="out")
+
+    assert {edge.edge_type for edge in edges} >= {
+        "only_valid_in",
+        "requires",
+        "use_instead",
+        "similar_to",
+        "converts_to",
+    }
+    assert all(edge.source_kind == "text_inference" for edge in edges)
+    assert all(edge.confidence < 1.0 for edge in edges)

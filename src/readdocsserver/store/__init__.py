@@ -11,12 +11,13 @@ from .fts_query import (
 )
 from .paths import default_db_path
 from .snippets import _context_line_from_chunk
-from .types import ChunkSpan, EntityEdge, EntityHit, SearchHit
+from .types import ChunkSpan, EntityEdge, EntityHit, EntityXrefCandidate, SearchHit
 
 __all__ = [
     "ChunkSpan",
     "DocIndex",
     "EntityEdge",
+    "EntityXrefCandidate",
     "EntityHit",
     "SearchHit",
     "default_db_path",

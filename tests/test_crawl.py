@@ -264,6 +264,42 @@ def test_extract_structured_entities_class_method_params_and_notes() -> None:
     assert method["line_start"] is not None
 
 
+def test_extract_structured_entities_xref_candidates() -> None:
+    html = b"""<!doctype html><html><body><article role="main">
+      <dl class="py class">
+        <dt class="sig sig-object py" id="pkg.Message">
+          <span class="sig-name descname"><span class="pre">Message</span></span>
+        </dt>
+        <dd>
+          <p>Returns <a class="reference internal" href="#pkg.User">User</a>.</p>
+          <dl class="field-list simple">
+            <dt>See also<span class="colon">:</span></dt>
+            <dd><p><a class="reference internal" href="#pkg.Channel">Channel</a></p></dd>
+          </dl>
+          <div class="admonition note"><p>Use with <a href="#pkg.View">View</a>.</p></div>
+          <div class="admonition warning"><p>Avoid <a href="#pkg.Legacy">Legacy</a>.</p></div>
+        </dd>
+      </dl>
+    </article></body></html>"""
+
+    _, text = extract_text_and_title(html, "https://docs.example/api.html")
+    entities = extract_structured_entities(html, "https://docs.example/api.html", text)
+    xrefs = entities[0]["xrefs"]
+
+    assert {xref["edge_type"] for xref in xrefs} >= {
+        "references",
+        "see_also",
+        "mentioned_in_note",
+        "mentioned_in_warning",
+    }
+    assert {xref["target_anchor"] for xref in xrefs} >= {
+        "pkg.User",
+        "pkg.Channel",
+        "pkg.View",
+        "pkg.Legacy",
+    }
+
+
 def test_same_site_links_filters_prefix() -> None:
     html = b"""
     <html><body>

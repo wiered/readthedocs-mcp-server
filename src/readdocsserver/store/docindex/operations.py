@@ -8,7 +8,7 @@ from typing import Any
 from ..chunking import _body_to_chunks_with_lines
 from ..entity_fts import _entity_fts_body_text
 from ..snippets import _approx_line_in_body, _context_line_info_from_chunk
-from ..types import EntityEdge, EntityHit, SearchHit
+from ..types import EntityEdge, EntityHit, EntityXrefCandidate, SearchHit
 
 
 def replace_chunks(conn: sqlite3.Connection, url: str, title: str, body: str) -> None:
@@ -43,8 +43,14 @@ def _entity_edge_from_row(row: sqlite3.Row) -> EntityEdge:
 
 def delete_edges_for_page(conn: sqlite3.Connection, url: str) -> None:
     conn.execute("DELETE FROM doc_entity_edges WHERE page_url = ?", (url,))
+    conn.execute("DELETE FROM doc_entity_xref_candidates WHERE page_url = ?", (url,))
     conn.execute(
         "DELETE FROM doc_entity_edges WHERE from_entity_id IN "
+        "(SELECT entity_id FROM doc_entities WHERE page_url = ?)",
+        (url,),
+    )
+    conn.execute(
+        "DELETE FROM doc_entity_xref_candidates WHERE from_entity_id IN "
         "(SELECT entity_id FROM doc_entities WHERE page_url = ?)",
         (url,),
     )
@@ -67,7 +73,12 @@ def replace_edges(
     source_base: str,
     edges: list[EntityEdge],
 ) -> None:
-    delete_edges_for_page(conn, url)
+    conn.execute("DELETE FROM doc_entity_edges WHERE page_url = ?", (url,))
+    conn.execute(
+        "DELETE FROM doc_entity_edges WHERE from_entity_id IN "
+        "(SELECT entity_id FROM doc_entities WHERE page_url = ?)",
+        (url,),
+    )
     for edge in edges:
         conn.execute(
             """
@@ -87,6 +98,125 @@ def replace_edges(
                 edge.confidence,
                 edge.snippet,
                 url,
+                edge.line_start,
+                edge.line_end,
+            ),
+        )
+
+
+def replace_xref_candidates(
+    conn: sqlite3.Connection,
+    url: str,
+    source_base: str,
+    candidates: list[EntityXrefCandidate],
+) -> None:
+    conn.execute("DELETE FROM doc_entity_xref_candidates WHERE page_url = ?", (url,))
+    for candidate in candidates:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO doc_entity_xref_candidates(
+                source_base, page_url, from_entity_id, edge_type, source_kind,
+                target_url, target_anchor, target_name, snippet, confidence,
+                line_start, line_end
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_base,
+                url,
+                candidate.from_entity_id,
+                candidate.edge_type,
+                candidate.source_kind,
+                candidate.target_url,
+                candidate.target_anchor,
+                candidate.target_name,
+                candidate.snippet,
+                candidate.confidence,
+                candidate.line_start,
+                candidate.line_end,
+            ),
+        )
+
+
+def resolved_candidate_edges(
+    conn: sqlite3.Connection,
+    source_base: str,
+    *,
+    page_url: str | None = None,
+) -> list[EntityEdge]:
+    page_filter = " AND c.page_url = ?" if page_url is not None else ""
+    args: list[Any] = [source_base]
+    if page_url is not None:
+        args.append(page_url)
+    rows = conn.execute(
+        f"""
+        SELECT c.source_base, c.from_entity_id, e.entity_id AS to_entity_id,
+               c.edge_type, c.source_kind, c.snippet, c.page_url, c.confidence,
+               c.line_start, c.line_end
+        FROM doc_entity_xref_candidates AS c
+        JOIN doc_entities AS e
+          ON e.source_base = c.source_base
+         AND (
+             (c.target_url = '' AND c.target_anchor != ''
+                 AND e.anchor = c.target_anchor)
+             OR (c.target_url != '' AND c.target_anchor != ''
+                 AND e.page_url = c.target_url AND e.anchor = c.target_anchor)
+             OR (c.target_name != '' AND e.qualname = c.target_name)
+             OR (c.target_name != '' AND e.name = c.target_name
+                 AND 1 = (
+                     SELECT COUNT(*) FROM doc_entities AS u
+                     WHERE u.source_base = c.source_base AND u.name = c.target_name
+                 ))
+         )
+        WHERE c.source_base = ?{page_filter}
+        ORDER BY c.page_url, c.from_entity_id, c.edge_type, e.entity_id
+        """,
+        args,
+    ).fetchall()
+    return [
+        EntityEdge(
+            edge_id=None,
+            source_base=row["source_base"],
+            from_entity_id=row["from_entity_id"],
+            to_entity_id=row["to_entity_id"],
+            edge_type=row["edge_type"],
+            source_kind=row["source_kind"],
+            confidence=float(row["confidence"]),
+            snippet=row["snippet"],
+            page_url=row["page_url"],
+            line_start=row["line_start"],
+            line_end=row["line_end"],
+        )
+        for row in rows
+    ]
+
+
+def rebuild_resolved_candidate_edges(conn: sqlite3.Connection, source_base: str) -> None:
+    conn.execute(
+        "DELETE FROM doc_entity_edges WHERE source_base = ? "
+        "AND source_kind IN ('xref', 'text_inference')",
+        (source_base,),
+    )
+    edges = resolved_candidate_edges(conn, source_base)
+    for edge in edges:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO doc_entity_edges(
+                source_base, from_entity_id, to_entity_id, edge_type, source_kind,
+                param_name, confidence, snippet, page_url, line_start, line_end
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_base,
+                edge.from_entity_id,
+                edge.to_entity_id,
+                edge.edge_type,
+                edge.source_kind,
+                edge.param_name,
+                edge.confidence,
+                edge.snippet,
+                edge.page_url,
                 edge.line_start,
                 edge.line_end,
             ),
@@ -204,7 +334,7 @@ def replace_entities(
     url: str,
     source_base: str,
     entities: list[dict[str, Any]],
-) -> None:
+) -> dict[str, str]:
     old_rows = conn.execute(
         "SELECT entity_id FROM doc_entities WHERE page_url = ?", (url,)
     ).fetchall()
@@ -301,6 +431,7 @@ def replace_entities(
                     str(note.get("text") or ""),
                 ),
             )
+    return local_to_entity
 
 
 def search_chunks_fts(
