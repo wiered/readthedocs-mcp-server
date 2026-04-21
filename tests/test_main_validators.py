@@ -51,6 +51,13 @@ def test_validate_symbol_name() -> None:
         main._validate_symbol_name("  ")
 
 
+def test_optional_edge_types() -> None:
+    assert main._optional_edge_types(None) is None
+    assert main._optional_edge_types(["returns", " returns ", ""]) == ["returns"]
+    with pytest.raises(ValueError, match="Unsupported edge_type"):
+        main._optional_edge_types(["related_to"])
+
+
 def test_validate_list_pages_limit() -> None:
     assert main._validate_list_pages_limit(1) == 1
     assert main._validate_list_pages_limit(500) == 500
@@ -244,3 +251,40 @@ def test_symbol_lookup_model_conversion() -> None:
     assert response.result.url_with_anchor.endswith("#discord.ui.LayoutView")
     assert response.result.line_start == 10
     assert response.result.context_start == 2
+
+
+def test_related_symbols_model_conversion() -> None:
+    response = main.RelatedSymbolsResponse.model_validate(
+        {
+            "found": True,
+            "symbol": {
+                "entity_id": "https://docs.example/api.html#pkg.Message",
+                "qualname": "pkg.Message",
+                "kind": "class",
+                "page_url": "https://docs.example/api.html",
+                "anchor": "pkg.Message",
+            },
+            "edges": [
+                {
+                    "direction": "in",
+                    "edge_type": "returns",
+                    "source_kind": "signature",
+                    "param_name": "",
+                    "confidence": 1.0,
+                    "target": {
+                        "entity_id": "https://docs.example/api.html#pkg.Service.send",
+                        "qualname": "pkg.Service.send",
+                        "kind": "method",
+                        "page_url": "https://docs.example/api.html",
+                        "anchor": "pkg.Service.send",
+                    },
+                }
+            ],
+        }
+    )
+
+    assert response.found is True
+    assert response.symbol is not None
+    assert response.symbol.qualname == "pkg.Message"
+    assert response.edges[0].direction == "in"
+    assert response.edges[0].target.qualname == "pkg.Service.send"

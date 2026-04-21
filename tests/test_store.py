@@ -583,3 +583,126 @@ def test_search_in_page_multiple_chunks(tmp_path: Path) -> None:
     assert all(h.url == url for h in hits)
     global_hits = idx.search("MATCHRARE", limit=10)
     assert len(global_hits) == 1
+
+
+def test_related_symbols_returns_outgoing_incoming_and_filters(
+    tmp_path: Path,
+) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    url = "https://docs.example/api.html"
+    idx.upsert_page(
+        url,
+        "API",
+        "Message\nView\nsend\nedit",
+        "https://docs.example/",
+        1,
+        [
+            {
+                "local_id": "pkg.Message",
+                "parent_local_id": None,
+                "anchor": "pkg.Message",
+                "kind": "class",
+                "name": "Message",
+                "qualname": "pkg.Message",
+                "signature": "Message",
+                "summary": "Message.",
+                "body_text": "Message.",
+                "line_start": 1,
+                "line_end": 1,
+                "params": [],
+                "notes": [],
+            },
+            {
+                "local_id": "pkg.View",
+                "parent_local_id": None,
+                "anchor": "pkg.View",
+                "kind": "class",
+                "name": "View",
+                "qualname": "pkg.View",
+                "signature": "View",
+                "summary": "View.",
+                "body_text": "View.",
+                "line_start": 2,
+                "line_end": 2,
+                "params": [],
+                "notes": [],
+            },
+            {
+                "local_id": "pkg.Message.send",
+                "parent_local_id": "pkg.Message",
+                "anchor": "pkg.Message.send",
+                "kind": "method",
+                "name": "send",
+                "qualname": "pkg.Message.send",
+                "signature": "send() -> Message",
+                "summary": "Send.",
+                "body_text": "Send.",
+                "line_start": 3,
+                "line_end": 3,
+                "params": [],
+                "notes": [],
+            },
+            {
+                "local_id": "pkg.Message.edit",
+                "parent_local_id": "pkg.Message",
+                "anchor": "pkg.Message.edit",
+                "kind": "method",
+                "name": "edit",
+                "qualname": "pkg.Message.edit",
+                "signature": "edit(view: View) -> Message",
+                "summary": "Edit.",
+                "body_text": "Edit.",
+                "line_start": 4,
+                "line_end": 4,
+                "params": [
+                    {
+                        "ord": 0,
+                        "name": "view",
+                        "type": "View",
+                        "default": "",
+                        "description": "",
+                    }
+                ],
+                "notes": [],
+            },
+        ],
+    )
+
+    out = idx.related_symbols(
+        "https://docs.example/",
+        "pkg.Message",
+        direction="out",
+        edge_types=["has_method"],
+    )
+    incoming_returns = idx.related_symbols(
+        "https://docs.example/",
+        "pkg.Message",
+        direction="in",
+        edge_types=["returns"],
+    )
+    incoming_params = idx.related_symbols(
+        "https://docs.example/",
+        "pkg.View",
+        direction="in",
+        edge_types=["accepts_parameter_type"],
+    )
+
+    assert out["found"] is True
+    assert {edge["target"]["qualname"] for edge in out["edges"]} == {
+        "pkg.Message.edit",
+        "pkg.Message.send",
+    }
+    assert {edge["target"]["qualname"] for edge in incoming_returns["edges"]} == {
+        "pkg.Message.edit",
+        "pkg.Message.send",
+    }
+    assert incoming_params["edges"][0]["param_name"] == "view"
+    assert incoming_params["edges"][0]["target"]["qualname"] == "pkg.Message.edit"
+
+
+def test_related_symbols_not_found(tmp_path: Path) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+
+    result = idx.related_symbols("https://docs.example/", "Missing")
+
+    assert result == {"found": False, "symbol": None, "edges": []}

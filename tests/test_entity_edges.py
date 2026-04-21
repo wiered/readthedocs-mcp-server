@@ -9,6 +9,7 @@ from readdocsserver.store.docindex.operations import (
     entity_edges_between,
     replace_edges,
 )
+from readdocsserver.store.entity_edges import build_edges_for_page
 from readdocsserver.store.entity_resolver import (
     build_symbol_maps,
     resolve_symbol_name,
@@ -41,6 +42,31 @@ def _entity(qualname: str, *, anchor: str | None = None) -> dict:
         "line_start": 1,
         "line_end": 1,
         "params": [],
+        "notes": [],
+    }
+
+
+def _method(
+    qualname: str,
+    parent_local_id: str,
+    *,
+    signature: str | None = None,
+    params: list[dict] | None = None,
+) -> dict:
+    name = qualname.rsplit(".", 1)[-1]
+    return {
+        "local_id": qualname,
+        "parent_local_id": parent_local_id,
+        "anchor": qualname,
+        "kind": "method",
+        "name": name,
+        "qualname": qualname,
+        "signature": signature or f"{name}()",
+        "summary": f"{qualname}.",
+        "body_text": f"{qualname}.",
+        "line_start": 2,
+        "line_end": 3,
+        "params": params or [],
         "notes": [],
     }
 
@@ -113,7 +139,9 @@ def test_replace_entities_preserves_valid_incoming_and_deletes_stale_edges(
     idx = DocIndex(tmp_path / "db.sqlite")
     target_url = "https://docs.example/target.html"
     ref_url = "https://docs.example/ref.html"
-    idx.upsert_page(target_url, "Target", "Target", SOURCE_BASE, 1, [_entity("pkg.Target")])
+    idx.upsert_page(
+        target_url, "Target", "Target", SOURCE_BASE, 1, [_entity("pkg.Target")]
+    )
     idx.upsert_page(ref_url, "Ref", "Ref", SOURCE_BASE, 1, [_entity("pkg.Ref")])
     target_id = f"{target_url}#pkg.Target"
     ref_id = f"{ref_url}#pkg.Ref"
@@ -131,7 +159,9 @@ def test_replace_entities_preserves_valid_incoming_and_deletes_stale_edges(
         replace_edges(conn, ref_url, SOURCE_BASE, [edge])
         conn.commit()
 
-    idx.upsert_page(target_url, "Target", "Target v2", SOURCE_BASE, 2, [_entity("pkg.Target")])
+    idx.upsert_page(
+        target_url, "Target", "Target v2", SOURCE_BASE, 2, [_entity("pkg.Target")]
+    )
     with _connect(idx.db_path) as conn:
         assert len(entity_edges(conn, target_id, direction="in")) == 1
 
@@ -216,3 +246,186 @@ def test_resolve_symbol_name_exact_unique_and_relative(tmp_path: Path) -> None:
     )
     assert resolve_symbol_name(maps, "pkg.ui.LayoutView", "Conflict") is None
     assert resolve_symbol_name(maps, "pkg.ui.LayoutView", "str") is None
+
+
+def test_build_edges_for_page_creates_has_method(tmp_path: Path) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    url = "https://docs.example/api.html"
+    idx.upsert_page(
+        url,
+        "API",
+        "LayoutView\nedit_message",
+        SOURCE_BASE,
+        1,
+        [
+            _entity("pkg.LayoutView"),
+            _method("pkg.LayoutView.edit_message", "pkg.LayoutView"),
+        ],
+    )
+
+    with _connect(idx.db_path) as conn:
+        edges = entity_edges(conn, f"{url}#pkg.LayoutView", edge_type="has_method")
+
+    assert len(edges) == 1
+    assert edges[0].to_entity_id == f"{url}#pkg.LayoutView.edit_message"
+    assert edges[0].source_kind == "structure"
+
+
+def test_build_edges_for_page_creates_returns_and_parameter_types(
+    tmp_path: Path,
+) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    url = "https://docs.example/api.html"
+    idx.upsert_page(
+        url,
+        "API",
+        "Message\nView\nLayoutView\nedit",
+        SOURCE_BASE,
+        1,
+        [
+            _entity("pkg.Message"),
+            _entity("pkg.View"),
+            _entity("pkg.LayoutView"),
+            _method(
+                "pkg.Message.edit",
+                "pkg.Message",
+                signature="edit(view: View | LayoutView | None) -> Message",
+                params=[
+                    {
+                        "ord": 0,
+                        "name": "view",
+                        "type": "View | LayoutView | None",
+                        "default": "",
+                        "description": "",
+                    }
+                ],
+            ),
+        ],
+    )
+
+    method_id = f"{url}#pkg.Message.edit"
+    with _connect(idx.db_path) as conn:
+        return_edges = entity_edges(conn, method_id, edge_type="returns")
+        param_edges = entity_edges(conn, method_id, edge_type="accepts_parameter_type")
+
+    assert [edge.to_entity_id for edge in return_edges] == [f"{url}#pkg.Message"]
+    assert {edge.to_entity_id for edge in param_edges} == {
+        f"{url}#pkg.View",
+        f"{url}#pkg.LayoutView",
+    }
+    assert {edge.param_name for edge in param_edges} == {"view"}
+
+
+def test_build_edges_for_page_creates_inherits_from(tmp_path: Path) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    url = "https://docs.example/api.html"
+    child = _entity("pkg.LayoutView")
+    child["signature"] = "class pkg.LayoutView(View)"
+    idx.upsert_page(
+        url,
+        "API",
+        "View\nLayoutView",
+        SOURCE_BASE,
+        1,
+        [_entity("pkg.View"), child],
+    )
+
+    with _connect(idx.db_path) as conn:
+        edges = entity_edges(conn, f"{url}#pkg.LayoutView", edge_type="inherits_from")
+
+    assert len(edges) == 1
+    assert edges[0].to_entity_id == f"{url}#pkg.View"
+    assert edges[0].snippet == "View"
+
+
+def test_build_edges_for_page_skips_unresolved_and_other_sources(
+    tmp_path: Path,
+) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    other_url = "https://other.example/api.html"
+    url = "https://docs.example/api.html"
+    idx.upsert_page(
+        other_url,
+        "Other",
+        "External",
+        "https://other.example/",
+        1,
+        [_entity("pkg.External")],
+    )
+    idx.upsert_page(
+        url,
+        "API",
+        "send",
+        SOURCE_BASE,
+        1,
+        [
+            {
+                **_entity("pkg.Service"),
+                "signature": "class pkg.Service(MissingBase)",
+            },
+            _method(
+                "pkg.Service.send",
+                "pkg.Service",
+                signature="send(value: External) -> MissingReturn",
+                params=[
+                    {
+                        "ord": 0,
+                        "name": "value",
+                        "type": "External",
+                        "default": "",
+                        "description": "",
+                    }
+                ],
+            ),
+        ],
+    )
+
+    with _connect(idx.db_path) as conn:
+        edges = build_edges_for_page(conn, SOURCE_BASE, url)
+
+    assert [edge.edge_type for edge in edges] == ["has_method"]
+
+
+def test_upsert_page_replaces_edges_without_duplicates(tmp_path: Path) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    url = "https://docs.example/api.html"
+    entities = [
+        _entity("pkg.Message"),
+        _method("pkg.Message.copy", "pkg.Message", signature="copy() -> Message"),
+    ]
+
+    idx.upsert_page(url, "API", "Message\ncopy", SOURCE_BASE, 1, entities)
+    idx.upsert_page(url, "API", "Message\ncopy v2", SOURCE_BASE, 2, entities)
+
+    with _connect(idx.db_path) as conn:
+        edges = entity_edges(conn, f"{url}#pkg.Message.copy", edge_type="returns")
+
+    assert len(edges) == 1
+
+
+def test_upsert_page_links_to_entity_from_other_page_same_source(
+    tmp_path: Path,
+) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    msg_url = "https://docs.example/message.html"
+    api_url = "https://docs.example/api.html"
+    idx.upsert_page(
+        msg_url, "Message", "Message", SOURCE_BASE, 1, [_entity("pkg.Message")]
+    )
+    idx.upsert_page(
+        api_url,
+        "API",
+        "send",
+        SOURCE_BASE,
+        1,
+        [
+            _entity("pkg.Service"),
+            _method("pkg.Service.send", "pkg.Service", signature="send() -> Message"),
+        ],
+    )
+
+    with _connect(idx.db_path) as conn:
+        edges = entity_edges(conn, f"{api_url}#pkg.Service.send", edge_type="returns")
+
+    assert len(edges) == 1
+    assert edges[0].to_entity_id == f"{msg_url}#pkg.Message"

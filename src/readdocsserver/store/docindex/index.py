@@ -13,12 +13,15 @@ from ..jsonutil import _json_list
 from ..paths import default_db_path
 from ..symbol_lookup import _empty_symbol_lookup, _symbol_lookup_from_row
 from ..types import EntityHit, SearchHit
+from ..entity_edges import build_edges_for_page
 from .operations import (
     child_methods,
+    entity_edges,
     entity_notes,
     entity_params,
     get_entity_row,
     replace_chunks,
+    replace_edges,
     replace_entities,
     search_chunks_fts,
     search_entities_fts,
@@ -126,6 +129,8 @@ class DocIndex:
                 )
                 replace_chunks(conn, url, title, body)
                 replace_entities(conn, url, source_base, entities or [])
+                edges = build_edges_for_page(conn, source_base, url)
+                replace_edges(conn, url, source_base, edges)
                 conn.commit()
             finally:
                 conn.close()
@@ -363,6 +368,154 @@ class DocIndex:
             finally:
                 conn.close()
 
+    def related_symbols(
+        self,
+        source_base: str,
+        symbol_name: str,
+        *,
+        edge_types: list[str] | None = None,
+        direction: str = "both",
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        if direction not in {"out", "in", "both"}:
+            raise ValueError("direction must be 'out', 'in', or 'both'")
+        symbol = symbol_name.strip()
+        if not symbol:
+            return {"found": False, "symbol": None, "edges": []}
+        limit = max(1, min(limit, 100))
+
+        with self._lock:
+            conn = self._connect()
+            try:
+                symbol_row = self._find_symbol_row(conn, source_base, symbol)
+                if symbol_row is None:
+                    return {"found": False, "symbol": None, "edges": []}
+                symbol_ref = _symbol_ref_from_row(symbol_row)
+                edge_rows = self._related_edge_rows(
+                    conn,
+                    str(symbol_row["entity_id"]),
+                    edge_types=edge_types,
+                    direction=direction,
+                    limit=limit,
+                )
+                refs = self._entity_refs_by_id(
+                    conn,
+                    [
+                        str(edge.to_entity_id)
+                        if edge.direction == "out"
+                        else str(edge.from_entity_id)
+                        for edge in edge_rows
+                    ],
+                )
+                edges = []
+                for edge in edge_rows:
+                    related_id = (
+                        str(edge.to_entity_id)
+                        if edge.direction == "out"
+                        else str(edge.from_entity_id)
+                    )
+                    target = refs.get(related_id)
+                    if target is None:
+                        continue
+                    edges.append(
+                        {
+                            "direction": edge.direction,
+                            "edge_type": edge.edge_type,
+                            "source_kind": edge.source_kind,
+                            "param_name": edge.param_name,
+                            "confidence": edge.confidence,
+                            "target": target,
+                        }
+                    )
+                return {"found": True, "symbol": symbol_ref, "edges": edges}
+            finally:
+                conn.close()
+
+    def _find_symbol_row(
+        self, conn: sqlite3.Connection, source_base: str, symbol: str
+    ) -> sqlite3.Row | None:
+        row = conn.execute(
+            """
+            SELECT entity_id, kind, name, qualname, page_url, anchor
+            FROM doc_entities
+            WHERE source_base = ?
+              AND (qualname = ? OR anchor = ? OR name = ?)
+            ORDER BY
+                CASE
+                    WHEN qualname = ? THEN 0
+                    WHEN anchor = ? THEN 1
+                    ELSE 2
+                END,
+                LENGTH(qualname),
+                qualname
+            LIMIT 1
+            """,
+            (source_base, symbol, symbol, symbol, symbol, symbol),
+        ).fetchone()
+        if row is not None:
+            return row
+
+        hits = []
+        for fts in _fts_match_stages(symbol):
+            hits = search_entities_fts(conn, fts, 1, source_base=source_base)
+            if hits:
+                break
+        if not hits:
+            return None
+        return conn.execute(
+            """
+            SELECT entity_id, kind, name, qualname, page_url, anchor
+            FROM doc_entities
+            WHERE entity_id = ?
+            """,
+            (hits[0].entity_id,),
+        ).fetchone()
+
+    def _related_edge_rows(
+        self,
+        conn: sqlite3.Connection,
+        entity_id: str,
+        *,
+        edge_types: list[str] | None,
+        direction: str,
+        limit: int,
+    ) -> list[_DirectedEdge]:
+        directions = ["out", "in"] if direction == "both" else [direction]
+        requested_types = edge_types or [None]
+        rows: list[_DirectedEdge] = []
+        for edge_direction in directions:
+            for edge_type in requested_types:
+                for edge in entity_edges(
+                    conn,
+                    entity_id,
+                    direction=edge_direction,
+                    edge_type=edge_type,
+                    limit=limit,
+                ):
+                    rows.append(_DirectedEdge(edge_direction, edge))
+                    if len(rows) >= limit:
+                        return rows
+        return rows
+
+    def _entity_refs_by_id(
+        self, conn: sqlite3.Connection, entity_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        if not entity_ids:
+            return {}
+        refs: dict[str, dict[str, Any]] = {}
+        for entity_id in sorted(set(entity_ids)):
+            row = conn.execute(
+                """
+                SELECT entity_id, kind, qualname, page_url, anchor
+                FROM doc_entities
+                WHERE entity_id = ?
+                """,
+                (entity_id,),
+            ).fetchone()
+            if row is not None:
+                refs[str(row["entity_id"])] = _symbol_ref_from_row(row)
+        return refs
+
     def get_page(self, url: str) -> dict[str, Any] | None:
         with self._lock:
             conn = self._connect()
@@ -461,3 +614,24 @@ class DocIndex:
 
     def stats_json(self) -> str:
         return json.dumps({"sources": self.list_sources(), "db_path": str(self._path)})
+
+
+class _DirectedEdge:
+    def __init__(self, direction: str, edge: Any) -> None:
+        self.direction = direction
+        self.from_entity_id = edge.from_entity_id
+        self.to_entity_id = edge.to_entity_id
+        self.edge_type = edge.edge_type
+        self.source_kind = edge.source_kind
+        self.param_name = edge.param_name
+        self.confidence = edge.confidence
+
+
+def _symbol_ref_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "entity_id": row["entity_id"],
+        "qualname": row["qualname"],
+        "kind": row["kind"],
+        "page_url": row["page_url"],
+        "anchor": row["anchor"],
+    }

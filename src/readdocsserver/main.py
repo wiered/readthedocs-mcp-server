@@ -21,6 +21,7 @@ Index Read the Docs / Sphinx HTML locally and query it with MCP search/fetch too
 Available MCP capabilities:
 - Tools for indexing, searching, fetching, listing indexed sources, listing pages per root, and scoped search (whole source or single page).
 - Symbol lookup for structured Sphinx/Python classes and methods when entity data is available.
+- Related symbol lookup for typed graph neighbors such as class methods, return types, parameter types, and base classes.
 - Prompts exposed as slash commands in compatible MCP clients for common workflows.
 - A status resource with the current database path and indexed source summary.
 
@@ -158,6 +159,35 @@ class LookupSymbolResponse(BaseModel):
     result: SymbolLookupResult
 
 
+class RelatedSymbolRef(BaseModel):
+    """Compact entity reference used in symbol graph responses."""
+
+    entity_id: str
+    qualname: str
+    kind: str
+    page_url: str
+    anchor: str | None = None
+
+
+class RelatedSymbolEdge(BaseModel):
+    """One typed edge adjacent to a symbol."""
+
+    direction: Literal["out", "in"]
+    edge_type: str
+    source_kind: str
+    param_name: str = ""
+    confidence: float
+    target: RelatedSymbolRef
+
+
+class RelatedSymbolsResponse(BaseModel):
+    """Typed symbol graph neighbors for one entity."""
+
+    found: bool
+    symbol: RelatedSymbolRef | None = None
+    edges: list[RelatedSymbolEdge] = Field(default_factory=list)
+
+
 class FetchMetadata(BaseModel):
     """Source metadata attached to a fetched page."""
 
@@ -286,6 +316,30 @@ def _validate_list_pages_limit(limit: int) -> int:
     if not 1 <= limit <= 500:
         raise ValueError("limit must be between 1 and 500")
     return limit
+
+
+_VALID_EDGE_TYPES = {
+    "has_method",
+    "inherits_from",
+    "returns",
+    "accepts_parameter_type",
+    "references",
+}
+
+
+def _optional_edge_types(edge_types: list[str] | None) -> list[str] | None:
+    if edge_types is None:
+        return None
+    cleaned: list[str] = []
+    for edge_type in edge_types:
+        value = edge_type.strip()
+        if not value:
+            continue
+        if value not in _VALID_EDGE_TYPES:
+            raise ValueError(f"Unsupported edge_type: {value}")
+        if value not in cleaned:
+            cleaned.append(value)
+    return cleaned or None
 
 
 def _validate_offset(offset: int) -> int:
@@ -506,6 +560,25 @@ def create_server() -> FastMCP:
             _validate_symbol_name(symbol_name),
         )
         return LookupSymbolResponse(result=SymbolLookupResult.model_validate(result))
+
+    @mcp.tool()
+    async def related_symbols(
+        source_base: str,
+        symbol_name: str,
+        edge_types: list[str] | None = None,
+        direction: Literal["out", "in", "both"] = "both",
+        limit: int = 50,
+    ) -> RelatedSymbolsResponse:
+        """Return typed symbol graph neighbors such as methods, return types, parameter types, and bases."""
+        idx = _index()
+        result = idx.related_symbols(
+            _optional_source_base(source_base) or "",
+            _validate_symbol_name(symbol_name),
+            edge_types=_optional_edge_types(edge_types),
+            direction=direction,
+            limit=_validate_limit(limit),
+        )
+        return RelatedSymbolsResponse.model_validate(result)
 
     @mcp.tool()
     async def get_entity(

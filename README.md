@@ -9,6 +9,7 @@ The server crawls a documentation tree, stores page text in SQLite with FTS5, an
 - Index Read the Docs and other Sphinx HTML sites into a local SQLite database
 - Search indexed pages with FTS5
 - Search Sphinx Python classes and methods with structured params, notes, warnings, and version markers
+- Explore typed symbol graph links for class methods, return types, parameter types, and base classes
 - Fetch full page text by URL id
 - Expose MCP prompts for common slash-command workflows
 - Support `stdio`, `sse`, and `streamable-http` transports
@@ -79,6 +80,7 @@ ruff check .
 - `search`: full-text search over indexed pages
 - `search_entities`: search structured Sphinx classes and methods
 - `lookup_symbol`: find one structured symbol and return its page, anchor, line range, and short context
+- `related_symbols`: list typed graph neighbors for one symbol
 - `get_entity`: fetch one structured class or method by `entity_id`
 - `list_class_methods`: list methods for a structured class
 - `get_entity_context`: search one entity and return its params and notes/warnings context
@@ -180,6 +182,10 @@ If you already know an API symbol such as `discord.ui.LayoutView`, use
 `lookup_symbol(source_base, symbol_name)` first. It returns the page URL, anchor,
 line range, and a compact context window in one call. Use `get_entity` afterward
 only when you need full structured params, notes, or child methods.
+
+Use `related_symbols(source_base, symbol_name)` when you need graph neighbors:
+methods declared by a class, methods returning a class, parameters accepting a
+class, or base classes parsed from signatures.
 
 ## Notes
 
