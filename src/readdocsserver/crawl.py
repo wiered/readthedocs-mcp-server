@@ -412,7 +412,10 @@ _PARAM_ITEM_RE = re.compile(
     r"(?:\((?P<type>[^)]*)\))?"
     r"(?:\s*[–-]\s*(?P<description>.*))?$"
 )
-_VERSION_RE = re.compile(r"^(?P<label>Added|Changed) in version (?P<version>[^:]+):?\s*(?P<text>.*)$")
+_VERSION_RE = re.compile(
+    r"^(?P<label>Added|Changed|Removed) in version (?P<version>[^:]+):?\s*(?P<text>.*)$"
+    r"|^Deprecated since version (?P<deprecated_version>[^:]+):?\s*(?P<deprecated_text>.*)$"
+)
 
 
 def _extract_py_entities(root: Tag) -> list[dict]:
@@ -594,21 +597,50 @@ def _extract_entity_notes(dds: list[Tag]) -> list[dict]:
                 kind = "versionadded"
             elif "versionchanged" in classes:
                 kind = "versionchanged"
+            elif "versionremoved" in classes:
+                kind = "versionremoved"
+            elif "deprecated" in classes:
+                kind = "deprecated"
             elif "admonition" in classes:
                 kind = "admonition"
             text = _inline_text(node)
             if not kind:
                 m = _VERSION_RE.match(text)
                 if m:
-                    kind = "versionadded" if m.group("label") == "Added" else "versionchanged"
-                    version = m.group("version").strip()
-                    text = m.group("text").strip() or text
+                    label = m.group("label")
+                    if label == "Added":
+                        kind = "versionadded"
+                    elif label == "Changed":
+                        kind = "versionchanged"
+                    elif label == "Removed":
+                        kind = "versionremoved"
+                    else:
+                        kind = "deprecated"
+                    version = (
+                        m.group("version") or m.group("deprecated_version") or ""
+                    ).strip()
+                    text = (
+                        m.group("text") or m.group("deprecated_text") or ""
+                    ).strip() or text
             if kind and text:
                 if kind.startswith("version") and not version:
                     m = _VERSION_RE.match(text)
                     if m:
-                        version = m.group("version").strip()
-                        text = m.group("text").strip() or text
+                        version = (
+                            m.group("version") or m.group("deprecated_version") or ""
+                        ).strip()
+                        text = (
+                            m.group("text") or m.group("deprecated_text") or ""
+                        ).strip() or text
+                elif kind == "deprecated" and not version:
+                    m = _VERSION_RE.match(text)
+                    if m:
+                        version = (
+                            m.group("version") or m.group("deprecated_version") or ""
+                        ).strip()
+                        text = (
+                            m.group("text") or m.group("deprecated_text") or ""
+                        ).strip() or text
                 notes.append(
                     {
                         "ord": len(notes),
@@ -630,6 +662,8 @@ def _has_structural_note_ancestor(node: Tag, boundary: Tag) -> bool:
             "admonition",
             "versionadded",
             "versionchanged",
+            "versionremoved",
+            "deprecated",
         }:
             return True
         parent = parent.parent

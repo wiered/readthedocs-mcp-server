@@ -158,6 +158,18 @@ def test_doc_index_structured_entities_roundtrip(tmp_path: Path) -> None:
                     "kind": "warning",
                     "version": "",
                     "text": "May fail after timeout.",
+                },
+                {
+                    "ord": 1,
+                    "kind": "versionchanged",
+                    "version": "1.3",
+                    "text": "Supports silent.",
+                },
+                {
+                    "ord": 2,
+                    "kind": "deprecated",
+                    "version": "1.4",
+                    "text": "Use update_message.",
                 }
             ],
         },
@@ -172,6 +184,22 @@ def test_doc_index_structured_entities_roundtrip(tmp_path: Path) -> None:
     assert entity is not None
     assert entity["notes"][0]["kind"] == "versionadded"
     assert [m["name"] for m in entity["methods"]] == ["edit_message"]
+
+    version_hits = idx.search_entities("versionadded 1.2 Initial", kind="class", limit=5)
+    assert len(version_hits) == 1
+    assert version_hits[0].name == "LayoutView"
+
+    changed_hits = idx.search_entities(
+        "versionchanged 1.3 silent", kind="method", limit=5
+    )
+    assert len(changed_hits) == 1
+    assert changed_hits[0].name == "edit_message"
+
+    deprecated_hits = idx.search_entities(
+        "Deprecated since version 1.4 update_message", kind="method", limit=5
+    )
+    assert len(deprecated_hits) == 1
+    assert deprecated_hits[0].name == "edit_message"
 
     method = idx.get_entity_context("edit_message", kind="method")
     assert method is not None

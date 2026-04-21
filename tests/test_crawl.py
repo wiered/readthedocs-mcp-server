@@ -156,6 +156,8 @@ def test_extract_structured_entities_class_method_params_and_notes() -> None:
             <div class="admonition note"><p class="admonition-title">Note</p><p>Only works for editable messages.</p></div>
             <div class="admonition warning"><p class="admonition-title">Warning</p><p>May fail after timeout.</p></div>
             <div class="versionchanged"><p>Changed in version 1.3: Supports silent.</p></div>
+            <div class="deprecated"><p>Deprecated since version 1.4: Use update_message.</p></div>
+            <div class="versionremoved"><p>Removed in version 2.0: No longer available.</p></div>
           </dd>
         </dl>
       </dd>
@@ -181,6 +183,8 @@ def test_extract_structured_entities_class_method_params_and_notes() -> None:
         "note",
         "warning",
         "versionchanged",
+        "deprecated",
+        "versionremoved",
     }
     assert method["line_start"] is not None
 
