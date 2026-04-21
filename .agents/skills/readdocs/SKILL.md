@@ -25,9 +25,9 @@ MCP tools: single docs root URL → crawl HTML → plain text in SQLite + FTS5. 
 
 1. `index_readthedocs` — not indexed or stale.
 2. Orient: `list_indexed_sources` / `readdocs://status` for `source_base` values; **`list_documentation_pages(source_base=…)`** to see concrete URLs/titles when search feels noisy or you need the right file path.
-3. **`search(query, source_base=…)`** — scoped keyword search (still **one hit per URL**); use when the question clearly belongs to one indexed root.
-4. **`search_in_file(page_url, query)`** — when the HTML page is known (from `list_documentation_pages` or a prior hit): **multiple results per file** (one per matching FTS chunk). Use `chunk_line_start` / `chunk_line_end` and `line` to choose **`fetch(id, start, end)`** windows.
-5. **`fetch(id, start, end)` preferred** — 1-based inclusive lines. After you know the target lines (from `search` / `search_in_file` or a tiny probe), **request a padded window around them**, not a razor-thin band on those lines alone: include headings, prose before/after, examples, and related bullets so the answer is grounded in full local context. Tune padding to page size (e.g. tens of lines around the hit); bare `fetch(id)` only when the page is short or a bounded slice still cannot answer.
+3. **`search(query, source_base=…)`** — scoped keyword search (still **one hit per URL**); use when the question clearly belongs to one indexed root and the target page is not already known.
+4. **`search_in_file(page_url, query)`** — when the HTML page is known (from `list_documentation_pages` or a prior hit): **multiple results per file** (one per matching FTS chunk). Prefer this over repeated global searches when refining a known page.
+5. **`fetch(id, start, end)`** — 1-based inclusive lines. Use it only when you need surrounding context around a known hit, code examples, or neighboring bullets/headings. Request a **padded window** around the target lines rather than a razor-thin band.
 6. `list_indexed_sources` or resource `readdocs://status` — JSON cache snapshot.
 
 ## Tools
@@ -68,23 +68,25 @@ Not vectors. Query → MATCH: **stop words dropped**; **strong** tokens (long, `
 ## Search -> Fetch rule
 
 - Use `search` (optionally with `source_base`) or `list_documentation_pages` + `search_in_file` to locate the right page and approximate line(s).
-- After the first relevant hit, switch immediately to `fetch(id, start, end)`.
-- Do not chain multiple `search` calls for the same question if a likely page is already known; prefer **`search_in_file`** when the URL is already identified.
+- After the first relevant hit, prefer `search_in_file(page_url, …)` to refine within that page before reaching for `fetch`.
+- Switch to `fetch(id, start, end)` only when the result needs surrounding context, examples, or nearby prose to answer cleanly.
+- Do not chain multiple global `search` calls for the same question if a likely page is already known; use `search_in_file` for page-local refinement.
 - **`start`/`end` must include surrounding context** (paragraphs above/below the hit), not the smallest interval that contains only the matched lines — the goal is the local document, not a line-exact excerpt.
 
 ## Mandatory search budget
 
 - For one user question, do at most **one global `search` call per docs source** (or one `search` with a fixed `source_base`) before switching to `fetch` or **`search_in_file`**.
 - **`search_in_file`** on a known URL does **not** count toward the global `search` reformulation budget — use it for extra in-file chunk hits instead of guessing new global queries.
-- If the first `search` returns a relevant hit on the target symbol/method/page, **you must not issue more `search` calls** for the same question until after at least one `fetch`.
+- If the first `search` returns a relevant hit on the target symbol/method/page, **you must not issue more global `search` calls** for the same question until after at least one `search_in_file` or `fetch`.
 - Additional `search` calls are allowed only if:
   - the first `search` returned no relevant hits, or
   - a `fetch`ed page proved to be unrelated.
 
 ## Mandatory fetch-first behavior
 
-- If `search` finds a page mentioning the exact API symbol, method name, class name, or quoted phrase from the user’s question, **immediately call `fetch(id, start, end)` on that result** with a **padded** line range around the hit (local section), not a one-line band.
-- Do not run synonym, variant, or reformulation searches before the first `fetch` when an exact-match hit already exists.
+- If `search` finds a page mentioning the exact API symbol, method name, class name, or quoted phrase from the user’s question, first inspect the page with `search_in_file(page_url, …)` when you need to locate the most relevant chunk.
+- Call `fetch(id, start, end)` only after you know which local lines matter, or when the chunk text is too thin to answer cleanly.
+- Do not run synonym, variant, or reformulation searches before the first page-local refinement when an exact-match hit already exists.
 
 ## Search failure policy
 
@@ -95,12 +97,13 @@ Not vectors. Query → MATCH: **stop words dropped**; **strong** tokens (long, `
 
 ## Token/latency discipline
 
-- Repeated `search` reformulations for the same symbol are considered misuse.
+- Repeated global `search` reformulations for the same symbol are considered misuse.
 - Prefer:
   1. one `search`
-  2. one `fetch` with a **padded** line range around the hit (usually enough)
-  3. one wider `fetch` if the neighborhood was still too tight
-  4. only then another `search` if still blocked
+  2. one or more `search_in_file` calls on the known page
+  3. one `fetch` with a **padded** line range around the hit when full context is needed
+  4. one wider `fetch` if the neighborhood was still too tight
+  5. only then another global `search` if still blocked
 
 ## Bad / Good patterns
 
@@ -113,4 +116,3 @@ Good:
 - `search("send_photo")`
 - `fetch(id, start, end)` with `start`/`end` bracketing the hit **plus** enough lines before/after for full local meaning
 - second `fetch` only if the first window missed neighboring sections
-

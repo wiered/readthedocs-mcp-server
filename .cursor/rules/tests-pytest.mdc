@@ -1,0 +1,13 @@
+---
+description: Automated tests live under tests/ and run with pytest.
+alwaysApply: true
+---
+
+# Tests
+
+- **Location**: keep all automated tests in the repository root directory **`tests/`** (not under `src/`).
+- **Runner**: use **pytest** (`pytest` from the project root). New test modules should follow pytest naming (`test_*.py` or `*_test.py`) and `test_*` functions or `Test*` classes.
+- Prefer **`PYTHONPATH=src`** or the **`pythonpath`** from `[tool.pytest.ini_options]` so imports like `readdocsserver.*` resolve without installing the package in editable mode, unless the project standard is otherwise.
+
+- **Linting & Formatting**: Run **`ruff check .`** to check style and **`ruff check . --fix`** to auto-fix, and **`ruff format .`** to format code. Always keep code base compliant with Ruff before submitting or merging PRs.
+

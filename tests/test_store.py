@@ -10,6 +10,7 @@ from readdocsserver.store import (
     _body_to_chunks_with_lines,
     _collect_query_pieces,
     _context_line_from_chunk,
+    _fts_match_stages,
     _fts_match_queries,
 )
 
@@ -37,6 +38,16 @@ def test_fts_match_queries_strong_and_weak() -> None:
 
     assert fallback is not None
     assert " OR " in fallback
+
+
+def test_fts_match_stages_auto_free_long_query() -> None:
+    stages = _fts_match_stages("send_photo photo URL local file caption examples")
+    assert len(stages) >= 3
+    assert '"send_photo"' in stages[0]
+    assert " OR " in stages[0]
+    assert stages[0].count(" AND ") < 6
+    assert '"send_photo"' in stages[1]
+    assert " OR " in stages[-1]
 
 
 def test_collect_query_pieces_quoted() -> None:
@@ -119,6 +130,21 @@ def test_doc_index_search_estimates_line_for_flattened_single_block(
     assert len(hits) == 1
     assert hits[0].line == 12
     assert "allow_paid_broadcast" in hits[0].snippet
+
+
+def test_doc_index_search_relaxes_long_free_form_query(tmp_path: Path) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    url = "https://docs.example/send-photo.html"
+    body = (
+        "send_photo\n\n"
+        "Use this method to send photos.\n"
+        "The photo argument can be a file_id, an HTTP URL, or an InputFile.\n"
+    )
+    idx.upsert_page(url, "send_photo", body, "https://docs.example/", 1)
+
+    hits = idx.search("send_photo photo URL local file caption examples", limit=5)
+    assert len(hits) == 1
+    assert hits[0].url == url
 
 
 def test_list_sources(tmp_path: Path) -> None:

@@ -90,6 +90,28 @@ _CHUNK_OVERLAP = 180
 _CHUNK_MIN_MERGE = 380
 # AND-ing many rare terms yields empty hits; cap required terms.
 _MAX_AND_TERMS = 6
+_MAX_REQUIRED_TERMS = 3
+_AUTO_FREE_TOKEN_THRESHOLD = 5
+_MAX_OPTIONAL_TERMS = 20
+_MAX_FALLBACK_TERMS = 12
+_LOW_SIGNAL_QUERY_TERMS = frozenset(
+    {
+        "docs",
+        "documentation",
+        "documentations",
+        "document",
+        "documents",
+        "example",
+        "examples",
+        "guide",
+        "guides",
+        "manual",
+        "reference",
+        "references",
+        "tutorial",
+        "tutorials",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -122,6 +144,79 @@ def _is_strong_token(w: str) -> bool:
     if len(w) >= 4 and not w.islower():
         return True
     return False
+
+
+def _is_low_signal_token(w: str) -> bool:
+    return w.lower() in _LOW_SIGNAL_QUERY_TERMS
+
+
+def _token_rank_key(w: str) -> tuple[int, int, int, int, int]:
+    """Rank API-ish identifiers above generic prose when picking anchors."""
+    return (
+        0 if _is_low_signal_token(w) else 1,
+        1 if ("_" in w or "." in w) else 0,
+        1 if len(w) >= 4 and not w.islower() else 0,
+        1 if any(ch.isdigit() for ch in w) else 0,
+        len(w),
+    )
+
+
+def _rank_query_tokens(tokens: list[str]) -> list[str]:
+    return sorted(tokens, key=_token_rank_key, reverse=True)
+
+
+def _ordered_terms(tokens: list[str], selected: list[str]) -> list[str]:
+    selected_keys = {item.lower() for item in selected}
+    return [token for token in tokens if token.lower() in selected_keys]
+
+
+def _compose_match_query(
+    phrase_terms: list[str], required_tokens: list[str], optional_tokens: list[str]
+) -> str | None:
+    parts: list[str] = []
+    parts.extend(phrase_terms)
+    if required_tokens:
+        parts.append(" AND ".join(_quote_token(token) for token in required_tokens))
+    if optional_tokens:
+        parts.append(
+            "(" + " OR ".join(_quote_token(token) for token in optional_tokens) + ")"
+        )
+    return " AND ".join(parts) if parts else None
+
+
+def _dedupe_queries(queries: list[str | None]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        if query is None:
+            continue
+        cleaned = query.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        out.append(cleaned)
+    return out
+
+
+def _auto_free_mode(phrases: list[str], tokens: list[str]) -> bool:
+    return len(phrases) + len(tokens) >= _AUTO_FREE_TOKEN_THRESHOLD
+
+
+def _pick_required_tokens(
+    tokens: list[str], strong: list[str], free_mode: bool
+) -> list[str]:
+    ranked_pool = _rank_query_tokens(strong or tokens)
+    ranked_pool = [
+        token for token in ranked_pool if not _is_low_signal_token(token)
+    ] or ranked_pool
+    if not ranked_pool:
+        return []
+    required_budget = min(_MAX_REQUIRED_TERMS, len(ranked_pool))
+    if free_mode and len(ranked_pool) > 1:
+        required_budget = min(required_budget, 2)
+    elif len(ranked_pool) >= 2:
+        required_budget = max(2, required_budget)
+    return ranked_pool[:required_budget]
 
 
 def _collect_query_pieces(raw: str) -> tuple[list[str], list[str]]:
@@ -170,71 +265,68 @@ def _collect_query_pieces(raw: str) -> tuple[list[str], list[str]]:
     return phrases, uniq
 
 
-def _fts_match_queries(user_query: str) -> tuple[str | None, str | None]:
+def _fts_match_stages(user_query: str) -> list[str]:
     """
-    Build primary and optional fallback FTS5 MATCH strings.
+    Build progressively looser FTS5 MATCH strings.
 
-    Primary: required AND on selective tokens + quoted phrases; extra weak terms OR-grouped
-    when both strong and weak tokens exist.
-
-    Fallback: OR across tokens (bounded) for recall when AND is too strict.
+    Stage 1: require a small set of high-signal tokens and keep the rest optional.
+    Stage 2: keep a single anchor token plus optional context.
+    Stage 3: broad OR fallback, enabled automatically for longer free-form queries.
     """
     stripped = user_query.strip()
     if not stripped:
-        return None, None
+        return []
     phrases, tokens = _collect_query_pieces(stripped)
     if not phrases and not tokens:
-        return None, None
+        return []
 
     phrase_terms = [_quote_token(p) for p in phrases]
-
     strong = [t for t in tokens if _is_strong_token(t)]
-    weak = [t for t in tokens if not _is_strong_token(t)]
+    free_mode = _auto_free_mode(phrases, tokens)
 
-    if strong:
-        strong.sort(key=len, reverse=True)
-        required = strong[:_MAX_AND_TERMS]
-    else:
-        tokens_by_len = sorted(tokens, key=len, reverse=True)
-        required = tokens_by_len[: min(_MAX_AND_TERMS, max(2, len(tokens_by_len)))]
+    required = _ordered_terms(tokens, _pick_required_tokens(tokens, strong, free_mode))
+    req_set = {token.lower() for token in required}
+    optional = [token for token in tokens if token.lower() not in req_set][
+        :_MAX_OPTIONAL_TERMS
+    ]
 
-    req_set = {t.lower() for t in required}
-    weak = [w for w in weak if w.lower() not in req_set]
+    stages: list[str | None] = [
+        _compose_match_query(phrase_terms, required, optional),
+    ]
 
-    primary_parts: list[str] = []
-    primary_parts.extend(phrase_terms)
-    if required:
-        primary_parts.append(" AND ".join(_quote_token(t) for t in required))
-    if weak and required:
-        or_clause = " OR ".join(_quote_token(w) for w in weak[:20])
-        primary_parts.append(f"({or_clause})")
+    if required and optional:
+        anchor = required[:1]
+        anchor_set = {token.lower() for token in anchor}
+        anchor_optional = [
+            token for token in tokens if token.lower() not in anchor_set
+        ][:_MAX_OPTIONAL_TERMS]
+        stages.append(_compose_match_query(phrase_terms, anchor, anchor_optional))
 
-    if not primary_parts:
-        primary_parts = [_quote_token(t) for t in tokens[:_MAX_AND_TERMS]]
-
-    primary = " AND ".join(primary_parts) if primary_parts else None
-
-    # Fallback: OR of longest tokens; optional AND with quoted phrases when phrases exist.
-    fallback_tokens = sorted(set(tokens), key=len, reverse=True)[:12]
+    fallback_tokens = _rank_query_tokens(tokens)[:_MAX_FALLBACK_TERMS]
     if phrases and fallback_tokens:
-        fb = (
+        stages.append(
             " AND ".join(phrase_terms)
             + " AND ("
-            + " OR ".join(_quote_token(t) for t in fallback_tokens)
+            + " OR ".join(_quote_token(token) for token in fallback_tokens)
             + ")"
         )
     elif phrases:
-        fb = " AND ".join(phrase_terms) if len(phrase_terms) > 1 else phrase_terms[0]
-    else:
-        fb = (
-            " OR ".join(_quote_token(t) for t in fallback_tokens)
-            if fallback_tokens
-            else None
-        )
+        stages.append(" AND ".join(phrase_terms))
+    elif free_mode and fallback_tokens:
+        stages.append(" OR ".join(_quote_token(token) for token in fallback_tokens))
 
-    if fb == primary:
-        fb = None
-    return primary, fb
+    return _dedupe_queries(stages)
+
+
+def _fts_match_queries(user_query: str) -> tuple[str | None, str | None]:
+    stages = _fts_match_stages(user_query)
+    if not stages:
+        return None, None
+    primary = stages[0]
+    fallback = stages[-1] if len(stages) > 1 else None
+    if fallback == primary:
+        fallback = None
+    return primary, fallback
 
 
 def _hard_split(text: str, max_chars: int, overlap: int) -> list[str]:
@@ -744,41 +836,37 @@ class DocIndex:
         *,
         source_base: str | None = None,
     ) -> list[SearchHit]:
-        primary, fallback = _fts_match_queries(query)
-        if primary is None:
+        stages = _fts_match_stages(query)
+        if not stages:
             return []
         limit = max(1, min(limit, 100))
-        return self._search_fts(
-            primary, limit, query, source_base=source_base, dedupe_url=True
-        ) or (
-            self._search_fts(
-                fallback, limit, query, source_base=source_base, dedupe_url=True
+        for fts in stages:
+            hits = self._search_fts(
+                fts, limit, query, source_base=source_base, dedupe_url=True
             )
-            if fallback
-            else []
-        )
+            if hits:
+                return hits
+        return []
 
     def search_in_page(
         self, page_url: str, query: str, limit: int = 15
     ) -> list[SearchHit]:
         """FTS over chunks of a single page; may return several hits (chunks) for the same URL."""
-        primary, fallback = _fts_match_queries(query)
-        if primary is None:
+        stages = _fts_match_stages(query)
+        if not stages:
             return []
         limit = max(1, min(limit, 100))
-        return self._search_fts(
-            primary,
-            limit,
-            query,
-            page_url=page_url,
-            dedupe_url=False,
-        ) or (
-            self._search_fts(
-                fallback, limit, query, page_url=page_url, dedupe_url=False
+        for fts in stages:
+            hits = self._search_fts(
+                fts,
+                limit,
+                query,
+                page_url=page_url,
+                dedupe_url=False,
             )
-            if fallback
-            else []
-        )
+            if hits:
+                return hits
+        return []
 
     def _search_fts(
         self,
