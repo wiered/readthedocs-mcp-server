@@ -220,6 +220,22 @@ def extract_structured_entities(
     return entities
 
 
+def extract_page_toc(html: bytes, page_url: str) -> list[dict]:
+    """Extract a lightweight nested table of contents from Sphinx sections."""
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    for tag in soup.select("a.headerlink"):
+        tag.decompose()
+    main = _find_main_content(soup)
+    toc: list[dict] = []
+    for section in _direct_section_children(main):
+        item = _section_to_toc_item(section, page_url, level=1)
+        if item is not None:
+            toc.append(item)
+    return toc
+
+
 def _find_main_content(soup: BeautifulSoup) -> Tag:
     for sel in (
         "div.rst-content",
@@ -233,6 +249,66 @@ def _find_main_content(soup: BeautifulSoup) -> Tag:
         if main:
             return main
     return soup.body or soup
+
+
+def _direct_section_children(root: Tag) -> list[Tag]:
+    sections: list[Tag] = []
+    for child in root.children:
+        if isinstance(child, Tag) and child.name == "section":
+            sections.append(child)
+    if sections:
+        return sections
+    for section in root.find_all("section"):
+        if not isinstance(section, Tag):
+            continue
+        parent = section.parent
+        has_section_parent = False
+        while isinstance(parent, Tag) and parent is not root:
+            if parent.name == "section":
+                has_section_parent = True
+                break
+            parent = parent.parent
+        if not has_section_parent:
+            sections.append(section)
+    return sections
+
+
+def _first_direct_child(tag: Tag, names: set[str]) -> Tag | None:
+    for child in tag.children:
+        if isinstance(child, Tag) and child.name in names:
+            return child
+    return None
+
+
+def _section_to_toc_item(section: Tag, page_url: str, *, level: int) -> dict | None:
+    section_id = str(section.get("id") or "").strip()
+    if not section_id:
+        return None
+
+    heading = _first_direct_child(section, {"h1", "h2", "h3", "h4", "h5", "h6"})
+    if heading is None:
+        return None
+
+    title = _inline_text(heading)
+    if not title:
+        return None
+
+    summary_el = _first_direct_child(section, {"p"})
+    summary = _inline_text(summary_el) if summary_el is not None else ""
+    children: list[dict] = []
+    for child_section in _direct_section_children(section):
+        child_item = _section_to_toc_item(child_section, page_url, level=level + 1)
+        if child_item is not None:
+            children.append(child_item)
+
+    return {
+        "id": section_id,
+        "title": title,
+        "summary": summary,
+        "level": level,
+        "url": f"{page_url}#{section_id}",
+        "children": children,
+    }
 
 
 def _collapse_ws(text: str) -> str:
@@ -867,17 +943,18 @@ async def crawl_readthedocs(
                 stats["skipped"] += 1
                 continue
 
-            title, body = extract_text_and_title(resp.content, str(resp.url))
-            entities = extract_structured_entities(resp.content, str(resp.url), body)
             final_url = canonical_page_url(normalize_page_url(str(resp.url)))
             if not under_prefix(final_url, origin, path_prefix):
                 stats["skipped"] += 1
                 continue
+            title, body = extract_text_and_title(resp.content, str(resp.url))
+            entities = extract_structured_entities(resp.content, str(resp.url), body)
+            toc = extract_page_toc(resp.content, final_url)
 
             stats["fetched"] += 1
             fetched_at = int(time.time())
             if on_page:
-                await on_page(final_url, title, body, root, fetched_at, entities)
+                await on_page(final_url, title, body, root, fetched_at, entities, toc)
 
             for link in same_site_links(
                 resp.content, str(resp.url), origin, path_prefix

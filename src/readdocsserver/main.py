@@ -186,12 +186,24 @@ class SourceListResponse(BaseModel):
     default_db_hint: str
 
 
+class PageSection(BaseModel):
+    """One section in a page-level table of contents."""
+
+    id: str
+    title: str
+    summary: str = ""
+    level: int
+    url: str
+    children: list["PageSection"] = Field(default_factory=list)
+
+
 class ListedPage(BaseModel):
-    """One indexed documentation page (URL + title + root)."""
+    """One indexed documentation page with a lightweight section overview."""
 
     url: str
     title: str
     source_base: str
+    toc: list[PageSection] = Field(default_factory=list)
 
 
 class ListPagesResponse(BaseModel):
@@ -417,8 +429,9 @@ def create_server() -> FastMCP:
             source_base: str,
             fetched_at: int,
             entities: list[dict],
+            toc: list[dict],
         ) -> None:
-            idx.upsert_page(url, title, body, source_base, fetched_at, entities)
+            idx.upsert_page(url, title, body, source_base, fetched_at, entities, toc)
 
         stats = await crawl_readthedocs(
             validated_seed_url,
@@ -596,7 +609,7 @@ def create_server() -> FastMCP:
         limit: int = 200,
         offset: int = 0,
     ) -> ListPagesResponse:
-        """List indexed page URLs and titles; filter by documentation root (source_base) and/or URL substring."""
+        """List indexed page URLs, titles, and section TOCs; filter by documentation root and/or URL substring."""
         lim = _validate_list_pages_limit(limit)
         off = _validate_offset(offset)
         idx = _index()

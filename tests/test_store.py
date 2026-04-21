@@ -105,6 +105,49 @@ def test_doc_index_roundtrip(tmp_path: Path) -> None:
     assert idx.search("UNIQUEHIT", limit=5) == []
 
 
+def test_doc_index_page_toc_roundtrip_and_replace(tmp_path: Path) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    url = "https://docs.example/page.html"
+    toc = [
+        {
+            "id": "intro",
+            "title": "Intro",
+            "summary": "Start here.",
+            "level": 1,
+            "url": f"{url}#intro",
+            "children": [
+                {
+                    "id": "install",
+                    "title": "Install",
+                    "summary": "",
+                    "level": 2,
+                    "url": f"{url}#install",
+                    "children": [],
+                }
+            ],
+        }
+    ]
+
+    idx.upsert_page(url, "Page", "body", "https://docs.example/", 1, toc=toc)
+    pages, total = idx.list_pages(source_base="https://docs.example/")
+
+    assert total == 1
+    assert pages[0]["toc"] == toc
+
+    idx.upsert_page(url, "Page", "body v2", "https://docs.example/", 2, toc=[])
+    pages_after_replace, _ = idx.list_pages(source_base="https://docs.example/")
+    assert pages_after_replace[0]["toc"] == []
+
+
+def test_doc_index_page_toc_defaults_to_empty(tmp_path: Path) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    idx.upsert_page("https://docs.example/page.html", "Page", "body", "https://docs.example/", 1)
+
+    pages, _ = idx.list_pages(source_base="https://docs.example/")
+
+    assert pages[0]["toc"] == []
+
+
 def test_doc_index_structured_entities_roundtrip(tmp_path: Path) -> None:
     idx = DocIndex(tmp_path / "db.sqlite")
     url = "https://docs.example/api.html"

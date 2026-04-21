@@ -181,6 +181,38 @@ def test_entity_detail_model_conversion() -> None:
     assert detail.methods[0].notes[0].kind == "warning"
 
 
+def test_listed_page_model_validates_nested_toc() -> None:
+    page = main.ListedPage.model_validate(
+        {
+            "url": "https://docs.example/api.html",
+            "title": "API",
+            "source_base": "https://docs.example/",
+            "toc": [
+                {
+                    "id": "api-reference",
+                    "title": "API Reference",
+                    "summary": "The following section outlines the API.",
+                    "level": 1,
+                    "url": "https://docs.example/api.html#api-reference",
+                    "children": [
+                        {
+                            "id": "clients",
+                            "title": "Clients",
+                            "summary": "",
+                            "level": 2,
+                            "url": "https://docs.example/api.html#clients",
+                            "children": [],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert page.toc[0].title == "API Reference"
+    assert page.toc[0].children[0].id == "clients"
+
+
 def test_symbol_lookup_model_conversion() -> None:
     response = main.LookupSymbolResponse(
         result=main.SymbolLookupResult.model_validate(

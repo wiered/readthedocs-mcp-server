@@ -121,6 +121,14 @@ class ChunkSpan:
     line_end: int
 
 
+def _json_list(raw: str) -> list[Any]:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return value if isinstance(value, list) else []
+
+
 def default_db_path() -> Path:
     return Path.home() / ".cache" / "readdocs-mcp" / "index.sqlite"
 
@@ -809,7 +817,8 @@ class DocIndex:
                         title TEXT NOT NULL,
                         body TEXT NOT NULL,
                         source_base TEXT NOT NULL,
-                        fetched_at INTEGER NOT NULL
+                        fetched_at INTEGER NOT NULL,
+                        toc_json TEXT NOT NULL DEFAULT '[]'
                     );
                     CREATE INDEX IF NOT EXISTS idx_pages_source ON pages(source_base);
 
@@ -902,6 +911,14 @@ class DocIndex:
                 legacy = conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pages_fts'"
                 ).fetchone()
+                page_cols = {
+                    row["name"]
+                    for row in conn.execute("PRAGMA table_info(pages)").fetchall()
+                }
+                if "toc_json" not in page_cols:
+                    conn.execute(
+                        "ALTER TABLE pages ADD COLUMN toc_json TEXT NOT NULL DEFAULT '[]'"
+                    )
                 chunk_cols = {
                     row["name"]
                     for row in conn.execute(
@@ -1161,22 +1178,25 @@ class DocIndex:
         source_base: str,
         fetched_at: int,
         entities: list[dict[str, Any]] | None = None,
+        toc: list[dict[str, Any]] | None = None,
     ) -> None:
+        toc_json = json.dumps(toc or [], ensure_ascii=False)
         with self._lock:
             conn = self._connect()
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 conn.execute(
                     """
-                    INSERT INTO pages(url, title, body, source_base, fetched_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO pages(url, title, body, source_base, fetched_at, toc_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(url) DO UPDATE SET
                         title=excluded.title,
                         body=excluded.body,
                         source_base=excluded.source_base,
-                        fetched_at=excluded.fetched_at
+                        fetched_at=excluded.fetched_at,
+                        toc_json=excluded.toc_json
                     """,
-                    (url, title, body, source_base, fetched_at),
+                    (url, title, body, source_base, fetched_at, toc_json),
                 )
                 self._replace_chunks(conn, url, title, body)
                 self._replace_entities(conn, url, source_base, entities or [])
@@ -1661,7 +1681,7 @@ class DocIndex:
                 total = int(total_row["n"]) if total_row else 0
                 rows = conn.execute(
                     f"""
-                    SELECT url, title, source_base
+                    SELECT url, title, source_base, toc_json
                     FROM pages
                     {where_sql}
                     ORDER BY url
@@ -1674,6 +1694,7 @@ class DocIndex:
                         "url": r["url"],
                         "title": r["title"],
                         "source_base": r["source_base"],
+                        "toc": _json_list(str(r["toc_json"] or "[]")),
                     }
                     for r in rows
                 ], total

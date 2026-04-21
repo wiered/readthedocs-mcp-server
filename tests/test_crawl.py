@@ -7,6 +7,7 @@ import pytest
 from readdocsserver.crawl import (
     _parse_sitemap_urls,
     canonical_page_url,
+    extract_page_toc,
     extract_structured_entities,
     extract_text_and_title,
     normalize_doc_root,
@@ -79,6 +80,80 @@ def test_extract_text_rst_content() -> None:
     assert title == "API"
     assert "Hello" in text
     assert "removed" not in text
+
+
+def test_extract_page_toc_nested_sections_and_summaries() -> None:
+    html = b"""<!doctype html><html><body>
+<div class="rst-content">
+  <section id="main-section">
+    <h1>Main section<a class="headerlink" href="#main-section">&#182;</a></h1>
+    <p>This is one sentence summary of section.</p>
+    <p>Second paragraph is not a TOC summary.</p>
+    <section id="sub-section-1">
+      <h2>Sub section 1<a class="headerlink" href="#sub-section-1">&#182;</a></h2>
+      <p>Sub summary.</p>
+    </section>
+    <section id="sub-section-2">
+      <h3>Sub section 2<a class="headerlink" href="#sub-section-2">&#182;</a></h3>
+    </section>
+  </section>
+</div></body></html>"""
+
+    toc = extract_page_toc(html, "https://docs.example/page.html")
+
+    assert toc == [
+        {
+            "id": "main-section",
+            "title": "Main section",
+            "summary": "This is one sentence summary of section.",
+            "level": 1,
+            "url": "https://docs.example/page.html#main-section",
+            "children": [
+                {
+                    "id": "sub-section-1",
+                    "title": "Sub section 1",
+                    "summary": "Sub summary.",
+                    "level": 2,
+                    "url": "https://docs.example/page.html#sub-section-1",
+                    "children": [],
+                },
+                {
+                    "id": "sub-section-2",
+                    "title": "Sub section 2",
+                    "summary": "",
+                    "level": 2,
+                    "url": "https://docs.example/page.html#sub-section-2",
+                    "children": [],
+                },
+            ],
+        }
+    ]
+
+
+def test_extract_page_toc_ignores_missing_id_heading_and_nested_paragraph() -> None:
+    html = b"""<!doctype html><html><body>
+<article>
+  <div>
+    <section id="asynctelebot">
+      <h1>AsyncTeleBot<a class="headerlink" href="#asynctelebot">&#182;</a></h1>
+      <section id="module-telebot.async_telebot">
+        <h2>AsyncTeleBot methods</h2>
+        <p>Nested summary only.</p>
+      </section>
+      <section><h2>No id</h2></section>
+      <section id="no-heading"><p>No heading.</p></section>
+    </section>
+  </div>
+</article></body></html>"""
+
+    toc = extract_page_toc(html, "https://docs.example/async.html")
+
+    assert toc[0]["id"] == "asynctelebot"
+    assert toc[0]["summary"] == ""
+    assert [child["id"] for child in toc[0]["children"]] == [
+        "module-telebot.async_telebot"
+    ]
+    assert toc[0]["children"][0]["summary"] == "Nested summary only."
 
 
 def test_extract_text_sphinx_signature_and_field_list() -> None:
