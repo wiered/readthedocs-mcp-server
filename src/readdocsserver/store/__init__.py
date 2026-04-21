@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .chunking import _body_to_chunks, _body_to_chunks_with_lines
-from .doc_index import DocIndex
+from .docindex import DocIndex
 from .fts_query import (
     _collect_query_pieces,
     _fts_match_queries,
