@@ -7,11 +7,6 @@ description: readdocs-mcp-server — crawl docs root → SQLite FTS5; search/fet
 
 MCP tools: single docs root URL → crawl HTML → plain text in SQLite + FTS5. Queries hit index, not live HTTP each time.
 
-## Skill path
-
-- **Codex / OpenAI**: `.agents/skills/` (this tree).
-- **Cursor**: often `~/.cursor/skills/` or `.cursor/skills/`. If `.agents/skills/` not picked up — add path in Cursor skill settings or copy folder to `.cursor/skills/readdocs/`.
-
 ## When
 
 - Index from `http(s)` seed (Sphinx, RTD, static HTML).
@@ -20,6 +15,25 @@ MCP tools: single docs root URL → crawl HTML → plain text in SQLite + FTS5. 
 - `search_in_file` when the page is known but global `search` dedupes to one chunk per URL — several in-file hits (chunks) with line hints.
 - `fetch` by hit `id` after `search` / `search_in_file`.
 - Cache introspection: roots, page counts, last fetch.
+
+## Quick routing
+
+- If you already know the exact `page_url`:
+  - use `search_in_file(page_url, query)`
+  - then `fetch(id, start, end)` if you need surrounding context
+
+- If you know the docs root / `source_base`, but not the page:
+  - run one scoped `search(query, source_base=...)`
+  - then refine with `search_in_file(page_url, query)`
+  - then `fetch(...)` if needed
+
+- If you are not sure whether the docs root is already indexed:
+  - check `list_indexed_sources()`
+  - if missing or stale, run `index_readthedocs(...)`
+
+- If you need the page inventory, exact path, or URL discovery:
+  - use `list_documentation_pages(...)`
+  - then `search_in_file(...)` on the chosen page
 
 ## Workflow
 
@@ -56,54 +70,33 @@ Not vectors. Query → MATCH: **stop words dropped**; **strong** tokens (long, `
 5. **Known file, many mentions:** use `search_in_file(page_url, …)` instead of repeated global `search`; then `fetch` around each `chunk_line_*` / `line` with padding.
 6. `search.text` = one context line; **do not** pull full page by default — `fetch(id, start, end)` with **generous padding** around the hit line; if the first slice still lacks surrounding explanation, widen once using `total_lines` / prior `slice_*`; `fetch(id)` without bounds only for short pages or when a bounded slice clearly insufficient.
 
-## Rules
+## Retrieval discipline
 
-- Prefer **`fetch(id, start, end)`** over full-page `fetch(id)` on huge pages — token hygiene; **default to a comfortably wide range** around the target lines (document neighborhood), then trim or widen only if needed.
-- **`list_documentation_pages`** does not replace `search` for semantic discovery — it lists URLs; pair with `search_in_file` for in-file precision.
-- `search` / `search_in_file` before `fetch`; no invented page text if index has it.
-- Missing page → re-`index_readthedocs` with correct versioned root (e.g. `…/en/stable/`).
-- Stored = HTML-extracted text, not pixel layout.
-- Anchors ≠ separate rows; one row per page for `fetch`; FTS ranks overlapping **chunks** for relevance.
-
-## Search -> Fetch rule
-
-- Use `search` (optionally with `source_base`) or `list_documentation_pages` + `search_in_file` to locate the right page and approximate line(s).
-- After the first relevant hit, prefer `search_in_file(page_url, …)` to refine within that page before reaching for `fetch`.
-- Switch to `fetch(id, start, end)` only when the result needs surrounding context, examples, or nearby prose to answer cleanly.
-- Do not chain multiple global `search` calls for the same question if a likely page is already known; use `search_in_file` for page-local refinement.
-- **`start`/`end` must include surrounding context** (paragraphs above/below the hit), not the smallest interval that contains only the matched lines — the goal is the local document, not a line-exact excerpt.
-
-## Mandatory search budget
-
-- For one user question, do at most **one global `search` call per docs source** (or one `search` with a fixed `source_base`) before switching to `fetch` or **`search_in_file`**.
-- **`search_in_file`** on a known URL does **not** count toward the global `search` reformulation budget — use it for extra in-file chunk hits instead of guessing new global queries.
-- If the first `search` returns a relevant hit on the target symbol/method/page, **you must not issue more global `search` calls** for the same question until after at least one `search_in_file` or `fetch`.
-- Additional `search` calls are allowed only if:
-  - the first `search` returned no relevant hits, or
-  - a `fetch`ed page proved to be unrelated.
-
-## Mandatory fetch-first behavior
-
-- If `search` finds a page mentioning the exact API symbol, method name, class name, or quoted phrase from the user’s question, first inspect the page with `search_in_file(page_url, …)` when you need to locate the most relevant chunk.
-- Call `fetch(id, start, end)` only after you know which local lines matter, or when the chunk text is too thin to answer cleanly.
-- Do not run synonym, variant, or reformulation searches before the first page-local refinement when an exact-match hit already exists.
-
-## Search failure policy
-
-- Before issuing a second `search`, explicitly verify that:
-  - no exact-match hit exists, or
-  - the fetched exact-match page was insufficient.
-- “Wanting more confidence” is **not** a valid reason for repeated `search`.
-
-## Token/latency discipline
-
-- Repeated global `search` reformulations for the same symbol are considered misuse.
-- Prefer:
-  1. one `search`
-  2. one or more `search_in_file` calls on the known page
-  3. one `fetch` with a **padded** line range around the hit when full context is needed
-  4. one wider `fetch` if the neighborhood was still too tight
-  5. only then another global `search` if still blocked
+- Before retrieving more, estimate how much depth the user’s question actually requires, and stop once you have enough to answer accurately.
+- Do not keep searching or fetching only to increase confidence when the answer is already clear.
+- Prefer the minimum retrieval needed for the question type: conceptual questions need less evidence than exhaustive or edge-case questions.
+- Avoid repeated near-duplicate searches or adjacent fetches unless they are likely to add genuinely new information.
+- Use indexed text before answering: no invented page content when `search`, `search_in_file`, or `fetch` can retrieve it.
+- Locate first, then fetch: use one scoped `search` or `list_documentation_pages` + `search_in_file` to identify the page and approximate lines.
+- For one user question, do at most **one global `search` per docs source** before switching to page-local work.
+- If a hit mentions the exact API symbol, method, class, page, or quoted phrase, do not reformulate globally yet; refine with `search_in_file(page_url, query)` and then `fetch` if needed.
+- `search_in_file` does not count against the global search budget; use it for extra chunks on a known page instead of repeated global searches.
+- Call `fetch(id, start, end)` only when you need surrounding prose, examples, or neighboring bullets/headings; prefer bounded fetches over full-page fetches on large pages.
+- `start`/`end` must be a padded document neighborhood around the hit, not a razor-thin match span. If still too tight, widen once using `total_lines` / prior `slice_*`.
+- A second global `search` is allowed only after verifying that no exact-match hit exists, or that `search_in_file` / `fetch` proved the exact-match page insufficient or unrelated. More confidence alone is not enough.
+- If a page is missing, stale, or from the wrong version/root, run `index_readthedocs(...)` with the correct versioned seed (for example `.../en/stable/`).
+- `list_documentation_pages` is URL/title inventory, not semantic search; pair it with `search_in_file` after choosing a page.
+- Stored content is HTML-extracted text, not pixel layout. Anchors are not separate rows: `fetch` returns one row per page, while FTS ranks overlapping chunks.
+- Token/latency default: one `search` -> one or more `search_in_file` calls -> one padded `fetch` -> one wider `fetch` if needed -> another global `search` only if still blocked.
+- For simple conceptual questions (e.g. "difference between X and Y"):
+  - You MUST NOT exceed:
+    - 1 global `search`
+    - 1–2 `search_in_file`
+    - 1–2 `fetch`
+  - Exceeding this budget requires clear evidence that the initial results are insufficient.
+- If you already understand the difference and usage after initial retrieval (even if some details are missing):
+  - STOP and answer.
+  - Do not perform additional searches or fetches for confirmation.
 
 ## Bad / Good patterns
 

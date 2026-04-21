@@ -7,6 +7,7 @@ import pytest
 from readdocsserver.crawl import (
     _parse_sitemap_urls,
     canonical_page_url,
+    extract_structured_entities,
     extract_text_and_title,
     normalize_doc_root,
     same_site_links,
@@ -120,6 +121,68 @@ def test_extract_text_sphinx_signature_and_field_list() -> None:
     assert "business_connection_id(str) – Business connection." in text
     assert "Returns:\nOn success, the sent Message is returned." in text
     assert "Return type:\ntelebot.types.Message" in text
+
+
+def test_extract_structured_entities_class_method_params_and_notes() -> None:
+    html = b"""<!doctype html><html><head><title>API</title></head>
+<body>
+  <article role="main">
+    <dl class="py class">
+      <dt class="sig sig-object py" id="views.LayoutView">
+        <span class="sig-name descname"><span class="pre">LayoutView</span></span>
+      </dt>
+      <dd>
+        <p>Layout container.</p>
+        <div class="versionadded"><p>Added in version 1.2: Initial class.</p></div>
+        <dl class="py method">
+          <dt class="sig sig-object py" id="views.LayoutView.edit_message">
+            <span class="sig-name descname"><span class="pre">edit_message</span></span>
+            <span class="sig-paren">(</span>
+            <em class="sig-param"><span class="n"><span class="pre">text</span></span><span class="p"><span class="pre">:</span></span> <span class="n"><span class="pre">str</span></span></em>,
+            <em class="sig-param"><span class="n"><span class="pre">silent</span></span><span class="p"><span class="pre">:</span></span> <span class="n"><span class="pre">bool</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>
+            <span class="sig-paren">)</span>
+          </dt>
+          <dd>
+            <p>Edit a message.</p>
+            <dl class="field-list simple">
+              <dt>Parameters<span class="colon">:</span></dt>
+              <dd>
+                <ul class="simple">
+                  <li><p><strong>text</strong> (<code>str</code>) - Message text.</p></li>
+                  <li><p><strong>parse_mode</strong> (<code>str</code>) - Parse mode.</p></li>
+                </ul>
+              </dd>
+            </dl>
+            <div class="admonition note"><p class="admonition-title">Note</p><p>Only works for editable messages.</p></div>
+            <div class="admonition warning"><p class="admonition-title">Warning</p><p>May fail after timeout.</p></div>
+            <div class="versionchanged"><p>Changed in version 1.3: Supports silent.</p></div>
+          </dd>
+        </dl>
+      </dd>
+    </dl>
+  </article>
+</body></html>"""
+    title, text = extract_text_and_title(html, "https://x/api.html")
+    entities = extract_structured_entities(html, "https://x/api.html", text)
+
+    assert title == "API"
+    assert len(entities) == 2
+    cls, method = entities
+    assert cls["kind"] == "class"
+    assert cls["name"] == "LayoutView"
+    assert cls["notes"][0]["kind"] == "versionadded"
+    assert method["kind"] == "method"
+    assert method["parent_local_id"] == cls["local_id"]
+    assert method["name"] == "edit_message"
+    assert [p["name"] for p in method["params"]] == ["text", "silent", "parse_mode"]
+    assert method["params"][0]["description"] == "Message text."
+    assert method["params"][1]["default"] == "False"
+    assert {n["kind"] for n in method["notes"]} >= {
+        "note",
+        "warning",
+        "versionchanged",
+    }
+    assert method["line_start"] is not None
 
 
 def test_same_site_links_filters_prefix() -> None:

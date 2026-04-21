@@ -8,6 +8,7 @@ The server crawls a documentation tree, stores page text in SQLite with FTS5, an
 
 - Index Read the Docs and other Sphinx HTML sites into a local SQLite database
 - Search indexed pages with FTS5
+- Search Sphinx Python classes and methods with structured params, notes, warnings, and version markers
 - Fetch full page text by URL id
 - Expose MCP prompts for common slash-command workflows
 - Support `stdio`, `sse`, and `streamable-http` transports
@@ -76,6 +77,10 @@ ruff check .
 
 - `index_readthedocs`: crawl and index a docs tree
 - `search`: full-text search over indexed pages
+- `search_entities`: search structured Sphinx classes and methods
+- `get_entity`: fetch one structured class or method by `entity_id`
+- `list_class_methods`: list methods for a structured class
+- `get_entity_context`: search one entity and return its params and notes/warnings context
 - `fetch`: fetch a page by canonical URL
 - `list_indexed_sources`: list indexed documentation roots
 
@@ -163,6 +168,12 @@ If Cursor is launched outside the project environment, using the full Python pat
 1. Call `index_readthedocs` with a docs URL such as `https://docs.readthedocs.io/en/stable/`.
 2. Call `search` with keywords.
 3. Call `fetch` with the `id` returned by `search`.
+
+For Sphinx Python API pages, re-index a source and use `search_entities` for
+queries such as `LayoutView`, then `get_entity` or `list_class_methods` for
+structured class/method details. Existing databases get the new schema
+automatically, but structured entities are populated only when a page is crawled
+again.
 
 ## Notes
 

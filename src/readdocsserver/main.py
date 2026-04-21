@@ -68,6 +68,69 @@ class SearchResponse(BaseModel):
     results: list[SearchResult]
 
 
+class EntityParam(BaseModel):
+    """One documented parameter for a structured API entity."""
+
+    ord: int
+    name: str
+    type: str = ""
+    default: str = ""
+    description: str = ""
+
+
+class EntityNote(BaseModel):
+    """A note, warning, admonition, or version marker attached to an entity."""
+
+    ord: int
+    kind: str
+    version: str = ""
+    text: str
+
+
+class EntityResult(BaseModel):
+    """Search result for a structured documentation entity."""
+
+    entity_id: str
+    kind: str
+    name: str
+    qualname: str
+    signature: str
+    summary: str
+    page_url: str
+    anchor: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    parent_entity_id: str | None = None
+
+
+class EntitySearchResponse(BaseModel):
+    """Collection of structured entity search hits."""
+
+    results: list[EntityResult]
+
+
+class EntityDetail(EntityResult):
+    """Full structured entity payload."""
+
+    source_base: str
+    body_text: str
+    params: list[EntityParam] = Field(default_factory=list)
+    notes: list[EntityNote] = Field(default_factory=list)
+    methods: list["EntityDetail"] = Field(default_factory=list)
+
+
+class EntityDetailResponse(BaseModel):
+    """One structured entity, or a not-found marker."""
+
+    entity: EntityDetail | None
+
+
+class EntityMethodListResponse(BaseModel):
+    """Methods belonging to one class entity."""
+
+    methods: list[EntityDetail]
+
+
 class FetchMetadata(BaseModel):
     """Source metadata attached to a fetched page."""
 
@@ -162,6 +225,17 @@ def _validate_limit(limit: int) -> int:
     return limit
 
 
+def _optional_entity_kind(kind: str | None) -> str | None:
+    if kind is None:
+        return None
+    k = kind.strip().lower()
+    if not k:
+        return None
+    if k not in {"class", "method"}:
+        raise ValueError("kind must be 'class', 'method', or omitted")
+    return k
+
+
 def _validate_list_pages_limit(limit: int) -> int:
     if not 1 <= limit <= 500:
         raise ValueError("limit must be between 1 and 500")
@@ -180,7 +254,11 @@ def _optional_source_base(source_base: str | None) -> str | None:
     if source_base is None:
         return None
     s = source_base.strip()
-    return s or None
+    if not s:
+        return None
+    # Match crawler-stored roots (see crawl_readthedocs: always normalize_doc_root(seed)).
+    # Also accepts a concrete page URL and narrows it to the docs directory prefix.
+    return normalize_doc_root(s)
 
 
 def _optional_url_contains(url_contains: str | None) -> str | None:
@@ -230,6 +308,48 @@ def _slice_body_lines(body: str, start: int, end: int) -> tuple[str, int, int, i
     return "\n".join(lines[s - 1 : e]), n, s, e
 
 
+def _entity_result_from_hit(hit) -> EntityResult:
+    return EntityResult(
+        entity_id=hit.entity_id,
+        kind=hit.kind,
+        name=hit.name,
+        qualname=hit.qualname,
+        signature=hit.signature,
+        summary=hit.summary,
+        page_url=hit.page_url,
+        anchor=hit.anchor,
+        line_start=hit.line_start,
+        line_end=hit.line_end,
+        parent_entity_id=hit.parent_entity_id,
+    )
+
+
+def _entity_detail_from_dict(data: dict) -> EntityDetail:
+    methods = [
+        _entity_detail_from_dict(method)
+        for method in data.get("methods", [])
+        if isinstance(method, dict)
+    ]
+    return EntityDetail(
+        entity_id=str(data["entity_id"]),
+        source_base=str(data["source_base"]),
+        page_url=str(data["page_url"]),
+        anchor=data.get("anchor"),
+        kind=str(data["kind"]),
+        name=str(data["name"]),
+        qualname=str(data["qualname"]),
+        signature=str(data["signature"]),
+        summary=str(data["summary"]),
+        body_text=str(data["body_text"]),
+        line_start=data.get("line_start"),
+        line_end=data.get("line_end"),
+        parent_entity_id=data.get("parent_entity_id"),
+        params=[EntityParam.model_validate(p) for p in data.get("params", [])],
+        notes=[EntityNote.model_validate(n) for n in data.get("notes", [])],
+        methods=methods,
+    )
+
+
 def create_server() -> FastMCP:
     """Build the FastMCP server with tools, prompts, and resources."""
     mcp = FastMCP(
@@ -262,8 +382,9 @@ def create_server() -> FastMCP:
             body: str,
             source_base: str,
             fetched_at: int,
+            entities: list[dict],
         ) -> None:
-            idx.upsert_page(url, title, body, source_base, fetched_at)
+            idx.upsert_page(url, title, body, source_base, fetched_at, entities)
 
         stats = await crawl_readthedocs(
             validated_seed_url,
@@ -303,6 +424,93 @@ def create_server() -> FastMCP:
             for hit in hits
         ]
         return SearchResponse(results=results)
+
+    @mcp.tool()
+    async def search_entities(
+        query: str,
+        kind: str | None = None,
+        source_base: str | None = None,
+        limit: int = 15,
+    ) -> EntitySearchResponse:
+        """Search structured docs entities such as Sphinx classes and methods."""
+        stripped_query = query.strip()
+        if not stripped_query:
+            raise ValueError("query must not be empty")
+        idx = _index()
+        hits = idx.search_entities(
+            stripped_query,
+            limit=_validate_limit(limit),
+            kind=_optional_entity_kind(kind),
+            source_base=_optional_source_base(source_base),
+        )
+        return EntitySearchResponse(
+            results=[_entity_result_from_hit(hit) for hit in hits]
+        )
+
+    @mcp.tool()
+    async def get_entity(
+        entity_id: str,
+        include_methods: bool = True,
+        include_params: bool = True,
+        include_notes: bool = True,
+    ) -> EntityDetailResponse:
+        """Fetch one structured entity by entity_id from search_entities."""
+        eid = entity_id.strip()
+        if not eid:
+            raise ValueError("entity_id must not be empty")
+        idx = _index()
+        entity = idx.get_entity(
+            eid,
+            include_methods=include_methods,
+            include_params=include_params,
+            include_notes=include_notes,
+        )
+        return EntityDetailResponse(
+            entity=_entity_detail_from_dict(entity) if entity else None
+        )
+
+    @mcp.tool()
+    async def list_class_methods(
+        class_name: str | None = None,
+        class_entity_id: str | None = None,
+        source_base: str | None = None,
+    ) -> EntityMethodListResponse:
+        """List methods for a class by class entity_id or class name."""
+        cleaned_name = class_name.strip() if class_name else None
+        cleaned_id = class_entity_id.strip() if class_entity_id else None
+        if not cleaned_name and not cleaned_id:
+            raise ValueError("Provide class_name or class_entity_id.")
+        idx = _index()
+        methods = idx.list_class_methods(
+            class_entity_id=cleaned_id,
+            class_name=cleaned_name,
+            source_base=_optional_source_base(source_base),
+        )
+        return EntityMethodListResponse(
+            methods=[_entity_detail_from_dict(method) for method in methods]
+        )
+
+    @mcp.tool()
+    async def get_entity_context(
+        query: str,
+        kind: str | None = None,
+        include_notes: bool = True,
+        source_base: str | None = None,
+    ) -> EntityDetailResponse:
+        """Search one entity and return its structured params and notes context."""
+        stripped_query = query.strip()
+        if not stripped_query:
+            raise ValueError("query must not be empty")
+        idx = _index()
+        entity = idx.get_entity_context(
+            stripped_query,
+            kind=_optional_entity_kind(kind),
+            include_notes=include_notes,
+            source_base=_optional_source_base(source_base),
+        )
+        return EntityDetailResponse(
+            entity=_entity_detail_from_dict(entity) if entity else None
+        )
 
     @mcp.tool()
     async def search_in_file(

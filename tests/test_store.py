@@ -105,6 +105,96 @@ def test_doc_index_roundtrip(tmp_path: Path) -> None:
     assert idx.search("UNIQUEHIT", limit=5) == []
 
 
+def test_doc_index_structured_entities_roundtrip(tmp_path: Path) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    url = "https://docs.example/api.html"
+    entities = [
+        {
+            "local_id": "views.LayoutView",
+            "parent_local_id": None,
+            "anchor": "views.LayoutView",
+            "kind": "class",
+            "name": "LayoutView",
+            "qualname": "views.LayoutView",
+            "signature": "LayoutView",
+            "summary": "Layout container.",
+            "body_text": "Layout container.",
+            "line_start": 1,
+            "line_end": 2,
+            "params": [],
+            "notes": [
+                {
+                    "ord": 0,
+                    "kind": "versionadded",
+                    "version": "1.2",
+                    "text": "Initial class.",
+                }
+            ],
+        },
+        {
+            "local_id": "views.LayoutView.edit_message",
+            "parent_local_id": "views.LayoutView",
+            "anchor": "views.LayoutView.edit_message",
+            "kind": "method",
+            "name": "edit_message",
+            "qualname": "views.LayoutView.edit_message",
+            "signature": "edit_message(text: str)",
+            "summary": "Edit a message.",
+            "body_text": "Edit a message.",
+            "line_start": 4,
+            "line_end": 8,
+            "params": [
+                {
+                    "ord": 0,
+                    "name": "text",
+                    "type": "str",
+                    "default": "",
+                    "description": "Message text.",
+                }
+            ],
+            "notes": [
+                {
+                    "ord": 0,
+                    "kind": "warning",
+                    "version": "",
+                    "text": "May fail after timeout.",
+                }
+            ],
+        },
+    ]
+    idx.upsert_page(url, "API", "LayoutView\n\nedit_message(text: str)", "https://docs.example/", 1, entities)
+
+    hits = idx.search_entities("LayoutView", kind="class", limit=5)
+    assert len(hits) == 1
+    assert hits[0].name == "LayoutView"
+
+    entity = idx.get_entity(hits[0].entity_id)
+    assert entity is not None
+    assert entity["notes"][0]["kind"] == "versionadded"
+    assert [m["name"] for m in entity["methods"]] == ["edit_message"]
+
+    method = idx.get_entity_context("edit_message", kind="method")
+    assert method is not None
+    assert method["params"][0]["name"] == "text"
+    assert method["notes"][0]["kind"] == "warning"
+
+    methods = idx.list_class_methods(class_name="LayoutView")
+    assert [m["name"] for m in methods] == ["edit_message"]
+
+    idx.upsert_page(
+        url,
+        "API",
+        "LayoutView only",
+        "https://docs.example/",
+        2,
+        entities[:1],
+    )
+    assert idx.search_entities("edit_message", kind="method", limit=5) == []
+
+    assert idx.clear_source("https://docs.example/") == 1
+    assert idx.search_entities("LayoutView", kind="class", limit=5) == []
+
+
 def test_doc_index_update_replaces_chunks(tmp_path: Path) -> None:
     idx = DocIndex(tmp_path / "db.sqlite")
     url = "https://x/doc"

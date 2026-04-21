@@ -660,6 +660,22 @@ class SearchHit:
     chunk_line_end: int | None = None
 
 
+@dataclass
+class EntityHit:
+    entity_id: str
+    kind: str
+    name: str
+    qualname: str
+    signature: str
+    summary: str
+    page_url: str
+    anchor: str | None
+    rank: float
+    line_start: int | None = None
+    line_end: int | None = None
+    parent_entity_id: str | None = None
+
+
 class DocIndex:
     """Thread-safe wrapper around SQLite + FTS5."""
 
@@ -727,6 +743,57 @@ class DocIndex:
                         INSERT INTO search_chunks_fts(rowid, url, title, chunk)
                         VALUES (new.chunk_id, new.url, new.title, new.chunk);
                     END;
+
+                    CREATE TABLE IF NOT EXISTS doc_entities (
+                        entity_id TEXT PRIMARY KEY,
+                        source_base TEXT NOT NULL,
+                        page_url TEXT NOT NULL,
+                        anchor TEXT,
+                        kind TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        qualname TEXT NOT NULL,
+                        signature TEXT NOT NULL,
+                        summary TEXT NOT NULL,
+                        body_text TEXT NOT NULL,
+                        parent_entity_id TEXT,
+                        line_start INTEGER,
+                        line_end INTEGER
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_doc_entities_page ON doc_entities(page_url);
+                    CREATE INDEX IF NOT EXISTS idx_doc_entities_source ON doc_entities(source_base);
+                    CREATE INDEX IF NOT EXISTS idx_doc_entities_kind_name ON doc_entities(kind, name);
+                    CREATE INDEX IF NOT EXISTS idx_doc_entities_parent ON doc_entities(parent_entity_id);
+
+                    CREATE TABLE IF NOT EXISTS doc_entity_params (
+                        entity_id TEXT NOT NULL,
+                        ord INTEGER NOT NULL,
+                        name TEXT NOT NULL,
+                        type TEXT NOT NULL DEFAULT '',
+                        default_value TEXT NOT NULL DEFAULT '',
+                        description TEXT NOT NULL DEFAULT '',
+                        PRIMARY KEY(entity_id, ord)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_doc_entity_params_entity ON doc_entity_params(entity_id);
+
+                    CREATE TABLE IF NOT EXISTS doc_entity_notes (
+                        entity_id TEXT NOT NULL,
+                        ord INTEGER NOT NULL,
+                        kind TEXT NOT NULL,
+                        version TEXT NOT NULL DEFAULT '',
+                        text TEXT NOT NULL,
+                        PRIMARY KEY(entity_id, ord)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_doc_entity_notes_entity ON doc_entity_notes(entity_id);
+
+                    CREATE VIRTUAL TABLE IF NOT EXISTS doc_entities_fts USING fts5(
+                        entity_id UNINDEXED,
+                        name,
+                        qualname,
+                        signature,
+                        summary,
+                        body_text,
+                        tokenize='porter unicode61'
+                    );
                     """
                 )
                 legacy = conn.execute(
@@ -788,10 +855,148 @@ class DocIndex:
                 (url, i, part.line_start, part.line_end, title, part.text),
             )
 
+    @staticmethod
+    def _delete_entities_for_page(conn: sqlite3.Connection, url: str) -> None:
+        entity_rows = conn.execute(
+            "SELECT entity_id FROM doc_entities WHERE page_url = ?", (url,)
+        ).fetchall()
+        entity_ids = [row["entity_id"] for row in entity_rows]
+        for entity_id in entity_ids:
+            conn.execute("DELETE FROM doc_entities_fts WHERE entity_id = ?", (entity_id,))
+        conn.execute(
+            "DELETE FROM doc_entity_params WHERE entity_id IN "
+            "(SELECT entity_id FROM doc_entities WHERE page_url = ?)",
+            (url,),
+        )
+        conn.execute(
+            "DELETE FROM doc_entity_notes WHERE entity_id IN "
+            "(SELECT entity_id FROM doc_entities WHERE page_url = ?)",
+            (url,),
+        )
+        conn.execute("DELETE FROM doc_entities WHERE page_url = ?", (url,))
+
+    @staticmethod
+    def _replace_entities(
+        conn: sqlite3.Connection,
+        url: str,
+        source_base: str,
+        entities: list[dict[str, Any]],
+    ) -> None:
+        DocIndex._delete_entities_for_page(conn, url)
+        local_to_entity: dict[str, str] = {}
+        entity_ids: list[str] = []
+        for i, entity in enumerate(entities):
+            local_id = str(entity.get("local_id") or "")
+            anchor = str(entity.get("anchor") or "").strip()
+            entity_id = f"{url}#{anchor}" if anchor else f"{url}#entity-{i}"
+            if local_id:
+                local_to_entity[local_id] = entity_id
+            entity_ids.append(entity_id)
+
+        for i, entity in enumerate(entities):
+            entity_id = entity_ids[i]
+            parent_local_id = entity.get("parent_local_id")
+            parent_entity_id = (
+                local_to_entity.get(str(parent_local_id)) if parent_local_id else None
+            )
+            conn.execute(
+                """
+                INSERT INTO doc_entities(
+                    entity_id, source_base, page_url, anchor, kind, name, qualname,
+                    signature, summary, body_text, parent_entity_id, line_start, line_end
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entity_id,
+                    source_base,
+                    url,
+                    entity.get("anchor") or None,
+                    str(entity.get("kind") or ""),
+                    str(entity.get("name") or ""),
+                    str(entity.get("qualname") or ""),
+                    str(entity.get("signature") or ""),
+                    str(entity.get("summary") or ""),
+                    str(entity.get("body_text") or ""),
+                    parent_entity_id,
+                    entity.get("line_start"),
+                    entity.get("line_end"),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO doc_entities_fts(
+                    entity_id, name, qualname, signature, summary, body_text
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entity_id,
+                    str(entity.get("name") or ""),
+                    str(entity.get("qualname") or ""),
+                    str(entity.get("signature") or ""),
+                    str(entity.get("summary") or ""),
+                    str(entity.get("body_text") or ""),
+                ),
+            )
+            for param in entity.get("params") or []:
+                conn.execute(
+                    """
+                    INSERT INTO doc_entity_params(
+                        entity_id, ord, name, type, default_value, description
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        entity_id,
+                        int(param.get("ord") or 0),
+                        str(param.get("name") or ""),
+                        str(param.get("type") or ""),
+                        str(param.get("default") or ""),
+                        str(param.get("description") or ""),
+                    ),
+                )
+            for note in entity.get("notes") or []:
+                conn.execute(
+                    """
+                    INSERT INTO doc_entity_notes(entity_id, ord, kind, version, text)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        entity_id,
+                        int(note.get("ord") or 0),
+                        str(note.get("kind") or ""),
+                        str(note.get("version") or ""),
+                        str(note.get("text") or ""),
+                    ),
+                )
+
     def clear_source(self, source_base: str) -> int:
         with self._lock:
             conn = self._connect()
             try:
+                entity_rows = conn.execute(
+                    "SELECT entity_id FROM doc_entities WHERE source_base = ?",
+                    (source_base,),
+                ).fetchall()
+                for row in entity_rows:
+                    conn.execute(
+                        "DELETE FROM doc_entities_fts WHERE entity_id = ?",
+                        (row["entity_id"],),
+                    )
+                conn.execute(
+                    "DELETE FROM doc_entity_params WHERE entity_id IN "
+                    "(SELECT entity_id FROM doc_entities WHERE source_base = ?)",
+                    (source_base,),
+                )
+                conn.execute(
+                    "DELETE FROM doc_entity_notes WHERE entity_id IN "
+                    "(SELECT entity_id FROM doc_entities WHERE source_base = ?)",
+                    (source_base,),
+                )
+                conn.execute(
+                    "DELETE FROM doc_entities WHERE source_base = ?", (source_base,)
+                )
                 conn.execute(
                     "DELETE FROM search_chunks WHERE url IN (SELECT url FROM pages WHERE source_base = ?)",
                     (source_base,),
@@ -806,7 +1011,13 @@ class DocIndex:
                 conn.close()
 
     def upsert_page(
-        self, url: str, title: str, body: str, source_base: str, fetched_at: int
+        self,
+        url: str,
+        title: str,
+        body: str,
+        source_base: str,
+        fetched_at: int,
+        entities: list[dict[str, Any]] | None = None,
     ) -> None:
         with self._lock:
             conn = self._connect()
@@ -825,6 +1036,7 @@ class DocIndex:
                     (url, title, body, source_base, fetched_at),
                 )
                 self._replace_chunks(conn, url, title, body)
+                self._replace_entities(conn, url, source_base, entities or [])
                 conn.commit()
             finally:
                 conn.close()
@@ -952,6 +1164,223 @@ class DocIndex:
                 return []
             finally:
                 conn.close()
+
+    def search_entities(
+        self,
+        query: str,
+        limit: int = 15,
+        *,
+        kind: str | None = None,
+        source_base: str | None = None,
+    ) -> list[EntityHit]:
+        stages = _fts_match_stages(query)
+        if not stages:
+            return []
+        limit = max(1, min(limit, 100))
+        for fts in stages:
+            hits = self._search_entities_fts(
+                fts, limit, kind=kind, source_base=source_base
+            )
+            if hits:
+                return hits
+        return []
+
+    def _search_entities_fts(
+        self,
+        fts: str,
+        limit: int,
+        *,
+        kind: str | None = None,
+        source_base: str | None = None,
+    ) -> list[EntityHit]:
+        where_extra = ""
+        extra_args: list[Any] = []
+        if kind is not None:
+            where_extra += " AND e.kind = ?"
+            extra_args.append(kind)
+        if source_base is not None:
+            where_extra += " AND e.source_base = ?"
+            extra_args.append(source_base)
+        sql = f"""
+            SELECT e.entity_id, e.kind, e.name, e.qualname, e.signature, e.summary,
+                   e.page_url, e.anchor, e.parent_entity_id, e.line_start, e.line_end,
+                   bm25(doc_entities_fts) AS rnk
+            FROM doc_entities_fts
+            JOIN doc_entities AS e ON e.entity_id = doc_entities_fts.entity_id
+            WHERE doc_entities_fts MATCH ?{where_extra}
+            ORDER BY bm25(doc_entities_fts) ASC, e.qualname ASC
+            LIMIT ?
+        """
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(sql, (fts, *extra_args, limit)).fetchall()
+                return [
+                    EntityHit(
+                        entity_id=row["entity_id"],
+                        kind=row["kind"],
+                        name=row["name"],
+                        qualname=row["qualname"],
+                        signature=row["signature"],
+                        summary=row["summary"],
+                        page_url=row["page_url"],
+                        anchor=row["anchor"],
+                        rank=float(row["rnk"]),
+                        line_start=row["line_start"],
+                        line_end=row["line_end"],
+                        parent_entity_id=row["parent_entity_id"],
+                    )
+                    for row in rows
+                ]
+            except sqlite3.OperationalError:
+                return []
+            finally:
+                conn.close()
+
+    def get_entity(
+        self,
+        entity_id: str,
+        *,
+        include_methods: bool = True,
+        include_params: bool = True,
+        include_notes: bool = True,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            conn = self._connect()
+            try:
+                entity = self._get_entity_row(conn, entity_id)
+                if entity is None:
+                    return None
+                if include_params:
+                    entity["params"] = self._entity_params(conn, entity_id)
+                if include_notes:
+                    entity["notes"] = self._entity_notes(conn, entity_id)
+                if include_methods and entity["kind"] == "class":
+                    entity["methods"] = self._child_methods(conn, entity_id)
+                return entity
+            finally:
+                conn.close()
+
+    def list_class_methods(
+        self,
+        *,
+        class_entity_id: str | None = None,
+        class_name: str | None = None,
+        source_base: str | None = None,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                entity_id = class_entity_id
+                if entity_id is None and class_name:
+                    row = conn.execute(
+                        """
+                        SELECT entity_id FROM doc_entities
+                        WHERE kind = 'class'
+                          AND (name = ? OR qualname = ?)
+                          AND (? IS NULL OR source_base = ?)
+                        ORDER BY LENGTH(qualname), qualname
+                        LIMIT 1
+                        """,
+                        (class_name, class_name, source_base, source_base),
+                    ).fetchone()
+                    entity_id = row["entity_id"] if row else None
+                if entity_id is None:
+                    return []
+                return self._child_methods(conn, entity_id)
+            finally:
+                conn.close()
+
+    def get_entity_context(
+        self,
+        query: str,
+        *,
+        kind: str | None = None,
+        include_notes: bool = True,
+        source_base: str | None = None,
+    ) -> dict[str, Any] | None:
+        hits = self.search_entities(
+            query, limit=1, kind=kind, source_base=source_base
+        )
+        if not hits:
+            return None
+        return self.get_entity(
+            hits[0].entity_id,
+            include_methods=False,
+            include_params=True,
+            include_notes=include_notes,
+        )
+
+    @staticmethod
+    def _get_entity_row(
+        conn: sqlite3.Connection, entity_id: str
+    ) -> dict[str, Any] | None:
+        row = conn.execute(
+            """
+            SELECT entity_id, source_base, page_url, anchor, kind, name, qualname,
+                   signature, summary, body_text, parent_entity_id, line_start, line_end
+            FROM doc_entities
+            WHERE entity_id = ?
+            """,
+            (entity_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    @staticmethod
+    def _entity_params(conn: sqlite3.Connection, entity_id: str) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT ord, name, type, default_value, description
+            FROM doc_entity_params
+            WHERE entity_id = ?
+            ORDER BY ord
+            """,
+            (entity_id,),
+        ).fetchall()
+        return [
+            {
+                "ord": row["ord"],
+                "name": row["name"],
+                "type": row["type"],
+                "default": row["default_value"],
+                "description": row["description"],
+            }
+            for row in rows
+        ]
+
+    @staticmethod
+    def _entity_notes(conn: sqlite3.Connection, entity_id: str) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT ord, kind, version, text
+            FROM doc_entity_notes
+            WHERE entity_id = ?
+            ORDER BY ord
+            """,
+            (entity_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _child_methods(
+        self, conn: sqlite3.Connection, class_entity_id: str
+    ) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT entity_id, source_base, page_url, anchor, kind, name, qualname,
+                   signature, summary, body_text, parent_entity_id, line_start, line_end
+            FROM doc_entities
+            WHERE parent_entity_id = ? AND kind = 'method'
+            ORDER BY name, signature
+            """,
+            (class_entity_id,),
+        ).fetchall()
+        methods: list[dict[str, Any]] = []
+        for row in rows:
+            method = dict(row)
+            method["params"] = self._entity_params(conn, row["entity_id"])
+            method["notes"] = self._entity_notes(conn, row["entity_id"])
+            methods.append(method)
+        return methods
 
     def get_page(self, url: str) -> dict[str, Any] | None:
         with self._lock:

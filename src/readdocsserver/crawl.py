@@ -195,7 +195,32 @@ def extract_text_and_title(html: bytes, page_url: str) -> tuple[str, str]:
         tag.decompose()
     title_el = soup.find("title")
     title = title_el.get_text(strip=True) if title_el else ""
-    main = None
+    main = _find_main_content(soup)
+    text = _render_text_blocks(main)
+    if not title:
+        h1 = soup.find("h1")
+        title = h1.get_text(strip=True) if h1 else urlparse(page_url).path
+    return title, text
+
+
+def extract_structured_entities(
+    html: bytes, page_url: str, body: str | None = None
+) -> list[dict]:
+    """Extract Sphinx Python-domain classes, methods, parameters, and notes."""
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    for tag in soup.select("a.headerlink"):
+        tag.decompose()
+    _ = page_url
+    main = _find_main_content(soup)
+    rendered_body = body if body is not None else _render_text_blocks(main)
+    entities = _extract_py_entities(main)
+    _attach_body_lines(entities, rendered_body)
+    return entities
+
+
+def _find_main_content(soup: BeautifulSoup) -> Tag:
     for sel in (
         "div.rst-content",
         "div[itemprop='articleBody']",
@@ -206,14 +231,8 @@ def extract_text_and_title(html: bytes, page_url: str) -> tuple[str, str]:
     ):
         main = soup.select_one(sel)
         if main:
-            break
-    if main is None:
-        main = soup.body or soup
-    text = _render_text_blocks(main)
-    if not title:
-        h1 = soup.find("h1")
-        title = h1.get_text(strip=True) if h1 else urlparse(page_url).path
-    return title, text
+            return main
+    return soup.body or soup
 
 
 def _collapse_ws(text: str) -> str:
@@ -255,6 +274,15 @@ def _is_field_list(tag: Tag) -> bool:
 
 def _is_py_object(tag: Tag) -> bool:
     return tag.name == "dl" and "py" in tag.get("class", [])
+
+
+def _py_object_kind(dl: Tag) -> str | None:
+    classes = set(dl.get("class", []))
+    if "class" in classes:
+        return "class"
+    if classes & {"method", "staticmethod", "classmethod"}:
+        return "method"
+    return None
 
 
 def _render_text_blocks(root: Tag) -> str:
@@ -379,6 +407,288 @@ def _render_field_list_items(dd: Tag) -> list[str]:
     return [text] if text else []
 
 
+_PARAM_ITEM_RE = re.compile(
+    r"^(?P<name>[A-Za-z_][\w.]*)"
+    r"(?:\((?P<type>[^)]*)\))?"
+    r"(?:\s*[–-]\s*(?P<description>.*))?$"
+)
+_VERSION_RE = re.compile(r"^(?P<label>Added|Changed) in version (?P<version>[^:]+):?\s*(?P<text>.*)$")
+
+
+def _extract_py_entities(root: Tag) -> list[dict]:
+    entities: list[dict] = []
+
+    def walk(node: Tag, parent_local_id: str | None) -> None:
+        for child in node.children:
+            if not isinstance(child, Tag):
+                continue
+            if _is_py_object(child):
+                entity = _entity_from_py_object(child, parent_local_id, len(entities))
+                current_parent = parent_local_id
+                if entity is not None:
+                    entities.append(entity)
+                    current_parent = str(entity["local_id"])
+                for dd in child.find_all("dd", recursive=False):
+                    walk(dd, current_parent)
+                continue
+            walk(child, parent_local_id)
+
+    walk(root, None)
+    return entities
+
+
+def _entity_from_py_object(
+    dl: Tag, parent_local_id: str | None, ordinal: int
+) -> dict | None:
+    kind = _py_object_kind(dl)
+    if kind is None:
+        return None
+    sig = dl.find("dt", recursive=False)
+    if not isinstance(sig, Tag):
+        return None
+    signature = _inline_text(sig, compact=True)
+    anchor = str(sig.get("id") or "").strip() or None
+    name = _signature_name(sig, signature, anchor)
+    qualname = anchor or _qualname_from_signature(signature) or name
+    local_id = anchor or f"{kind}:{qualname}:{ordinal}"
+    dds = [child for child in dl.find_all("dd", recursive=False) if isinstance(child, Tag)]
+    body_blocks = [_render_entity_body(dd) for dd in dds]
+    body_text = "\n\n".join(block for block in body_blocks if block)
+    summary = _entity_summary(dds, body_text)
+    return {
+        "local_id": local_id,
+        "parent_local_id": parent_local_id,
+        "anchor": anchor,
+        "kind": kind,
+        "name": name,
+        "qualname": qualname,
+        "signature": signature,
+        "summary": summary,
+        "body_text": body_text,
+        "line_start": None,
+        "line_end": None,
+        "params": _extract_entity_params(sig, dds),
+        "notes": _extract_entity_notes(dds),
+    }
+
+
+def _signature_name(sig: Tag, signature: str, anchor: str | None) -> str:
+    name_el = sig.select_one(".sig-name .pre, .sig-name, .descname .pre, .descname")
+    if name_el:
+        text = _inline_text(name_el, compact=True)
+        if text:
+            return text.rsplit(".", 1)[-1]
+    qualname = _qualname_from_signature(signature)
+    if qualname:
+        return qualname.rsplit(".", 1)[-1]
+    if anchor:
+        return anchor.rsplit(".", 1)[-1]
+    return signature.split("(", 1)[0].strip().rsplit(" ", 1)[-1]
+
+
+def _qualname_from_signature(signature: str) -> str | None:
+    head = signature.split("(", 1)[0].strip()
+    head = re.sub(r"^(async|abstract|abstractmethod|classmethod|staticmethod|class)\s+", "", head)
+    return head or None
+
+
+def _extract_entity_params(sig: Tag, dds: list[Tag]) -> list[dict]:
+    params = _params_from_signature(sig)
+    by_name = {p["name"]: p for p in params}
+    for param in _params_from_field_lists(dds):
+        existing = by_name.get(param["name"])
+        if existing is None:
+            by_name[param["name"]] = param
+            params.append(param)
+            continue
+        if param.get("type") and not existing.get("type"):
+            existing["type"] = param["type"]
+        if param.get("description"):
+            existing["description"] = param["description"]
+    for i, param in enumerate(params):
+        param["ord"] = i
+    return params
+
+
+def _params_from_signature(sig: Tag) -> list[dict]:
+    params: list[dict] = []
+    for i, param in enumerate(sig.select("em.sig-param")):
+        text = _inline_text(param, compact=True)
+        if not text:
+            continue
+        name_part = text.split(":", 1)[0].split("=", 1)[0].strip()
+        name = name_part.lstrip("*").strip()
+        if not name or name in {"/"}:
+            continue
+        type_text = ""
+        default = ""
+        if ":" in text:
+            after_colon = text.split(":", 1)[1]
+            if "=" in after_colon:
+                type_text, default = [part.strip() for part in after_colon.split("=", 1)]
+            else:
+                type_text = after_colon.strip()
+        elif "=" in text:
+            default = text.split("=", 1)[1].strip()
+        params.append(
+            {
+                "ord": i,
+                "name": name,
+                "type": type_text,
+                "default": default,
+                "description": "",
+            }
+        )
+    return params
+
+
+def _params_from_field_lists(dds: list[Tag]) -> list[dict]:
+    params: list[dict] = []
+    for dd in dds:
+        for field in dd.find_all("dl", class_="field-list"):
+            children = [child for child in field.children if isinstance(child, Tag)]
+            i = 0
+            while i < len(children):
+                dt = children[i]
+                value = children[i + 1] if i + 1 < len(children) else None
+                i += 2
+                if dt.name != "dt" or not isinstance(value, Tag) or value.name != "dd":
+                    continue
+                label = _inline_text(dt).rstrip(":").lower()
+                if label != "parameters":
+                    continue
+                for item in _render_field_list_items(value):
+                    parsed = _parse_parameter_item(item)
+                    if parsed:
+                        params.append(parsed)
+    return params
+
+
+def _parse_parameter_item(text: str) -> dict | None:
+    m = _PARAM_ITEM_RE.match(text.strip())
+    if not m:
+        return None
+    return {
+        "ord": 0,
+        "name": m.group("name"),
+        "type": (m.group("type") or "").strip(),
+        "default": "",
+        "description": (m.group("description") or "").strip(),
+    }
+
+
+def _extract_entity_notes(dds: list[Tag]) -> list[dict]:
+    notes: list[dict] = []
+    for dd in dds:
+        for node in dd.find_all(["div", "p"], recursive=True):
+            if _has_structural_note_ancestor(node, dd):
+                continue
+            classes = set(node.get("class", []))
+            kind = None
+            version = ""
+            if "warning" in classes:
+                kind = "warning"
+            elif "note" in classes:
+                kind = "note"
+            elif "versionadded" in classes:
+                kind = "versionadded"
+            elif "versionchanged" in classes:
+                kind = "versionchanged"
+            elif "admonition" in classes:
+                kind = "admonition"
+            text = _inline_text(node)
+            if not kind:
+                m = _VERSION_RE.match(text)
+                if m:
+                    kind = "versionadded" if m.group("label") == "Added" else "versionchanged"
+                    version = m.group("version").strip()
+                    text = m.group("text").strip() or text
+            if kind and text:
+                if kind.startswith("version") and not version:
+                    m = _VERSION_RE.match(text)
+                    if m:
+                        version = m.group("version").strip()
+                        text = m.group("text").strip() or text
+                notes.append(
+                    {
+                        "ord": len(notes),
+                        "kind": kind,
+                        "version": version,
+                        "text": text,
+                    }
+                )
+    return notes
+
+
+def _has_structural_note_ancestor(node: Tag, boundary: Tag) -> bool:
+    parent = node.parent
+    while isinstance(parent, Tag) and parent is not boundary:
+        classes = set(parent.get("class", []))
+        if classes & {
+            "note",
+            "warning",
+            "admonition",
+            "versionadded",
+            "versionchanged",
+        }:
+            return True
+        parent = parent.parent
+    return False
+
+
+def _render_entity_body(dd: Tag) -> str:
+    blocks: list[str] = []
+    for child in dd.children:
+        if isinstance(child, NavigableString):
+            text = _normalize_inline_text(str(child))
+            if text:
+                blocks.append(text)
+            continue
+        if not isinstance(child, Tag) or _is_py_object(child):
+            continue
+        if _is_field_list(child):
+            rendered = _render_field_list(child)
+            if rendered:
+                blocks.append(rendered)
+            continue
+        blocks.extend(_render_blocks(child))
+    return "\n\n".join(block for block in blocks if block.strip())
+
+
+def _entity_summary(dds: list[Tag], body_text: str) -> str:
+    for dd in dds:
+        for child in dd.children:
+            if isinstance(child, Tag) and child.name == "p":
+                text = _inline_text(child)
+                if text:
+                    return text
+    for line in body_text.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def _attach_body_lines(entities: list[dict], body: str) -> None:
+    lines = body.splitlines()
+    used: dict[str, int] = {}
+    for entity in entities:
+        signature = str(entity.get("signature") or "").strip()
+        name = str(entity.get("name") or "").strip()
+        needle = signature or name
+        if not needle:
+            continue
+        key = needle.lower()
+        start_at = used.get(key, 0)
+        for idx in range(start_at, len(lines)):
+            line = lines[idx].strip()
+            if needle in line or (name and name in line):
+                line_no = idx + 1
+                entity["line_start"] = line_no
+                entity["line_end"] = line_no + max(0, str(entity.get("body_text") or "").count("\n"))
+                used[key] = idx + 1
+                break
+
+
 _HEAD_RELS = frozenset(
     {
         "next",
@@ -442,7 +752,8 @@ async def crawl_readthedocs(
     """
     BFS crawl starting from seed_url, staying under the documentation root directory.
 
-    on_page: optional async callback(url, title, body) for each stored page.
+    on_page: optional async callback(url, title, body, source_base, fetched_at, entities)
+    for each stored page.
     """
     root = normalize_doc_root(seed_url)
     p = urlparse(root)
@@ -523,6 +834,7 @@ async def crawl_readthedocs(
                 continue
 
             title, body = extract_text_and_title(resp.content, str(resp.url))
+            entities = extract_structured_entities(resp.content, str(resp.url), body)
             final_url = canonical_page_url(normalize_page_url(str(resp.url)))
             if not under_prefix(final_url, origin, path_prefix):
                 stats["skipped"] += 1
@@ -531,7 +843,7 @@ async def crawl_readthedocs(
             stats["fetched"] += 1
             fetched_at = int(time.time())
             if on_page:
-                await on_page(final_url, title, body, root, fetched_at)
+                await on_page(final_url, title, body, root, fetched_at, entities)
 
             for link in same_site_links(
                 resp.content, str(resp.url), origin, path_prefix

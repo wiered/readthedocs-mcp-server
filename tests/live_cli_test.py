@@ -34,6 +34,12 @@ from readdocsserver.main import create_server  # noqa: E402
 _MAX_PREVIEW_CHARS = 12_000
 
 
+def _split_repl_line(raw: str) -> list[str]:
+    # Use POSIX shell parsing on every platform so quotes group arguments
+    # without becoming part of URLs passed to MCP tools.
+    return shlex.split(raw, posix=True)
+
+
 def _print_json(data: Any) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2))
 
@@ -173,7 +179,7 @@ async def _repl() -> None:
         if not raw:
             continue
         try:
-            parts = shlex.split(raw, posix=os.name != "nt")
+            parts = _split_repl_line(raw)
         except ValueError as e:
             print(f"parse error: {e}")
             continue
@@ -253,7 +259,7 @@ async def _repl() -> None:
                     continue
                 limit = 15
                 source_base = None
-                q_parts: list[str] = []
+                rest: list[str] = []
                 i = 0
                 while i < len(args):
                     a = args[i]
@@ -261,13 +267,13 @@ async def _repl() -> None:
                         source_base = args[i + 1]
                         i += 2
                         continue
-                    if i == len(args) - 1 and a.isdigit():
-                        limit = int(a)
-                        i += 1
-                        continue
-                    q_parts.append(a)
+                    rest.append(a)
                     i += 1
-                query = " ".join(q_parts).strip()
+                # Limit is the last token only if at least one query token remains
+                # (so "search 404" searches for 404, not "empty query").
+                if len(rest) >= 2 and rest[-1].isdigit():
+                    limit = int(rest.pop())
+                query = " ".join(rest).strip()
                 if not query:
                     print("empty query")
                     continue

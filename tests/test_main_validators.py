@@ -34,6 +34,15 @@ def test_validate_limit() -> None:
         main._validate_limit(101)
 
 
+def test_optional_entity_kind() -> None:
+    assert main._optional_entity_kind(None) is None
+    assert main._optional_entity_kind("  ") is None
+    assert main._optional_entity_kind("Class") == "class"
+    assert main._optional_entity_kind("method") == "method"
+    with pytest.raises(ValueError, match="kind"):
+        main._optional_entity_kind("function")
+
+
 def test_validate_list_pages_limit() -> None:
     assert main._validate_list_pages_limit(1) == 1
     assert main._validate_list_pages_limit(500) == 500
@@ -55,6 +64,11 @@ def test_optional_source_base() -> None:
     assert main._optional_source_base(None) is None
     assert main._optional_source_base("  ") is None
     assert main._optional_source_base(" https://x/ ") == "https://x/"
+    assert main._optional_source_base("https://x.com/en/latest") == "https://x.com/en/latest/"
+    assert (
+        main._optional_source_base("https://x.com/en/latest/page.html")
+        == "https://x.com/en/latest/"
+    )
 
 
 def test_validate_page_url() -> None:
@@ -91,3 +105,71 @@ def test_slice_body_lines() -> None:
     empty, nz, _, _ = main._slice_body_lines("", 1, 1)
     assert empty == ""
     assert nz == 0
+
+
+def test_entity_detail_model_conversion() -> None:
+    detail = main._entity_detail_from_dict(
+        {
+            "entity_id": "https://docs.example/api.html#views.LayoutView",
+            "source_base": "https://docs.example/",
+            "page_url": "https://docs.example/api.html",
+            "anchor": "views.LayoutView",
+            "kind": "class",
+            "name": "LayoutView",
+            "qualname": "views.LayoutView",
+            "signature": "LayoutView",
+            "summary": "Layout container.",
+            "body_text": "Layout container.",
+            "parent_entity_id": None,
+            "line_start": 1,
+            "line_end": 2,
+            "params": [],
+            "notes": [
+                {
+                    "ord": 0,
+                    "kind": "versionadded",
+                    "version": "1.2",
+                    "text": "Initial class.",
+                }
+            ],
+            "methods": [
+                {
+                    "entity_id": "https://docs.example/api.html#views.LayoutView.edit_message",
+                    "source_base": "https://docs.example/",
+                    "page_url": "https://docs.example/api.html",
+                    "anchor": "views.LayoutView.edit_message",
+                    "kind": "method",
+                    "name": "edit_message",
+                    "qualname": "views.LayoutView.edit_message",
+                    "signature": "edit_message(text: str)",
+                    "summary": "Edit a message.",
+                    "body_text": "Edit a message.",
+                    "parent_entity_id": "https://docs.example/api.html#views.LayoutView",
+                    "line_start": 4,
+                    "line_end": 6,
+                    "params": [
+                        {
+                            "ord": 0,
+                            "name": "text",
+                            "type": "str",
+                            "default": "",
+                            "description": "Message text.",
+                        }
+                    ],
+                    "notes": [
+                        {
+                            "ord": 0,
+                            "kind": "warning",
+                            "version": "",
+                            "text": "May fail.",
+                        }
+                    ],
+                    "methods": [],
+                }
+            ],
+        }
+    )
+    assert detail.name == "LayoutView"
+    assert detail.notes[0].kind == "versionadded"
+    assert detail.methods[0].params[0].name == "text"
+    assert detail.methods[0].notes[0].kind == "warning"
