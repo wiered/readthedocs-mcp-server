@@ -195,6 +195,194 @@ def test_doc_index_structured_entities_roundtrip(tmp_path: Path) -> None:
     assert idx.search_entities("LayoutView", kind="class", limit=5) == []
 
 
+def test_lookup_symbol_exact_qualname_returns_location_context(tmp_path: Path) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    url = "https://discordpy.readthedocs.io/en/stable/interactions/api.html"
+    body = "\n".join(
+        [
+            "intro",
+            "discord.ui.LayoutView",
+            "Represents a UI layout view.",
+            "More details.",
+            "footer",
+        ]
+    )
+    idx.upsert_page(
+        url,
+        "API",
+        body,
+        "https://discordpy.readthedocs.io/en/stable/",
+        1,
+        [
+            {
+                "local_id": "discord.ui.LayoutView",
+                "parent_local_id": None,
+                "anchor": "discord.ui.LayoutView",
+                "kind": "class",
+                "name": "LayoutView",
+                "qualname": "discord.ui.LayoutView",
+                "signature": "class discord.ui.LayoutView",
+                "summary": "Represents a UI layout view.",
+                "body_text": "Represents a UI layout view.",
+                "line_start": 2,
+                "line_end": 3,
+                "params": [],
+                "notes": [],
+            }
+        ],
+    )
+
+    result = idx.lookup_symbol(
+        "https://discordpy.readthedocs.io/en/stable/",
+        "discord.ui.LayoutView",
+    )
+
+    assert result["found"] is True
+    assert result["page_url"] == url
+    assert result["anchor"] == "discord.ui.LayoutView"
+    assert result["url_with_anchor"] == f"{url}#discord.ui.LayoutView"
+    assert result["line_start"] == 2
+    assert result["line_end"] == 3
+    assert result["context_start"] == 1
+    assert result["context_end"] == 5
+    assert "discord.ui.LayoutView" in result["context"]
+
+
+def test_lookup_symbol_anchor_and_bare_name_matches(tmp_path: Path) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    url = "https://docs.example/api.html"
+    idx.upsert_page(
+        url,
+        "API",
+        "LayoutView\n\nedit_message",
+        "https://docs.example/",
+        1,
+        [
+            {
+                "local_id": "pkg.views.LayoutView",
+                "parent_local_id": None,
+                "anchor": "pkg.views.LayoutView",
+                "kind": "class",
+                "name": "LayoutView",
+                "qualname": "pkg.views.LayoutView",
+                "signature": "LayoutView",
+                "summary": "Layout container.",
+                "body_text": "Layout container.",
+                "line_start": 1,
+                "line_end": 1,
+                "params": [],
+                "notes": [],
+            }
+        ],
+    )
+
+    by_anchor = idx.lookup_symbol("https://docs.example/", "pkg.views.LayoutView")
+    by_name = idx.lookup_symbol("https://docs.example/", "LayoutView")
+
+    assert by_anchor["found"] is True
+    assert by_anchor["qualname"] == "pkg.views.LayoutView"
+    assert by_name["found"] is True
+    assert by_name["qualname"] == "pkg.views.LayoutView"
+
+
+def test_lookup_symbol_source_base_scopes_results(tmp_path: Path) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    entity = {
+        "local_id": "pkg.Widget",
+        "parent_local_id": None,
+        "anchor": "pkg.Widget",
+        "kind": "class",
+        "name": "Widget",
+        "qualname": "pkg.Widget",
+        "signature": "Widget",
+        "summary": "Widget.",
+        "body_text": "Widget.",
+        "line_start": 1,
+        "line_end": 1,
+        "params": [],
+        "notes": [],
+    }
+    idx.upsert_page("https://a/api.html", "A", "Widget", "https://a/", 1, [entity])
+
+    result = idx.lookup_symbol("https://b/", "pkg.Widget")
+
+    assert result["found"] is False
+    assert result["page_url"] is None
+
+
+def test_lookup_symbol_falls_back_to_entity_fts(tmp_path: Path) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    url = "https://docs.example/api.html"
+    idx.upsert_page(
+        url,
+        "API",
+        "Widget\n\nA special layout container.",
+        "https://docs.example/",
+        1,
+        [
+            {
+                "local_id": "pkg.Widget",
+                "parent_local_id": None,
+                "anchor": "pkg.Widget",
+                "kind": "class",
+                "name": "Widget",
+                "qualname": "pkg.Widget",
+                "signature": "Widget",
+                "summary": "A special layout container.",
+                "body_text": "A special layout container.",
+                "line_start": 1,
+                "line_end": 2,
+                "params": [],
+                "notes": [],
+            }
+        ],
+    )
+
+    result = idx.lookup_symbol("https://docs.example/", "special layout container")
+
+    assert result["found"] is True
+    assert result["qualname"] == "pkg.Widget"
+    assert result["page_url"] == url
+
+
+def test_lookup_symbol_missing_and_missing_lines(tmp_path: Path) -> None:
+    idx = DocIndex(tmp_path / "db.sqlite")
+    idx.upsert_page(
+        "https://docs.example/api.html",
+        "API",
+        "body",
+        "https://docs.example/",
+        1,
+        [
+            {
+                "local_id": "pkg.NoLines",
+                "parent_local_id": None,
+                "anchor": "pkg.NoLines",
+                "kind": "class",
+                "name": "NoLines",
+                "qualname": "pkg.NoLines",
+                "signature": "NoLines",
+                "summary": "Summary fallback.",
+                "body_text": "Body fallback.",
+                "line_start": None,
+                "line_end": None,
+                "params": [],
+                "notes": [],
+            }
+        ],
+    )
+
+    missing = idx.lookup_symbol("https://docs.example/", "DoesNotExist")
+    no_lines = idx.lookup_symbol("https://docs.example/", "pkg.NoLines")
+
+    assert missing["found"] is False
+    assert missing["context"] == ""
+    assert no_lines["found"] is True
+    assert no_lines["line_start"] is None
+    assert no_lines["context_start"] is None
+    assert no_lines["context"] == "Body fallback."
+
+
 def test_doc_index_update_replaces_chunks(tmp_path: Path) -> None:
     idx = DocIndex(tmp_path / "db.sqlite")
     url = "https://x/doc"

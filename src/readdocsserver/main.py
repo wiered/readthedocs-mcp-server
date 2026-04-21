@@ -20,6 +20,7 @@ Index Read the Docs / Sphinx HTML locally and query it with MCP search/fetch too
 
 Available MCP capabilities:
 - Tools for indexing, searching, fetching, listing indexed sources, listing pages per root, and scoped search (whole source or single page).
+- Symbol lookup for structured Sphinx/Python classes and methods when entity data is available.
 - Prompts exposed as slash commands in compatible MCP clients for common workflows.
 - A status resource with the current database path and indexed source summary.
 
@@ -131,6 +132,32 @@ class EntityMethodListResponse(BaseModel):
     methods: list[EntityDetail]
 
 
+class SymbolLookupResult(BaseModel):
+    """One best structured symbol lookup result with page location context."""
+
+    found: bool
+    symbol_name: str
+    page_url: str | None = None
+    anchor: str | None = None
+    url_with_anchor: str | None = None
+    kind: str | None = None
+    name: str | None = None
+    qualname: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    context_start: int | None = None
+    context_end: int | None = None
+    context: str = ""
+    summary: str = ""
+    entity_id: str | None = None
+
+
+class LookupSymbolResponse(BaseModel):
+    """Symbol lookup response."""
+
+    result: SymbolLookupResult
+
+
 class FetchMetadata(BaseModel):
     """Source metadata attached to a fetched page."""
 
@@ -234,6 +261,13 @@ def _optional_entity_kind(kind: str | None) -> str | None:
     if k not in {"class", "method"}:
         raise ValueError("kind must be 'class', 'method', or omitted")
     return k
+
+
+def _validate_symbol_name(symbol_name: str) -> str:
+    s = symbol_name.strip()
+    if not s:
+        raise ValueError("symbol_name must not be empty")
+    return s
 
 
 def _validate_list_pages_limit(limit: int) -> int:
@@ -446,6 +480,19 @@ def create_server() -> FastMCP:
         return EntitySearchResponse(
             results=[_entity_result_from_hit(hit) for hit in hits]
         )
+
+    @mcp.tool()
+    async def lookup_symbol(
+        source_base: str,
+        symbol_name: str,
+    ) -> LookupSymbolResponse:
+        """Find one structured Sphinx/Python symbol and return page, anchor, lines, and short context."""
+        idx = _index()
+        result = idx.lookup_symbol(
+            _optional_source_base(source_base) or "",
+            _validate_symbol_name(symbol_name),
+        )
+        return LookupSymbolResponse(result=SymbolLookupResult.model_validate(result))
 
     @mcp.tool()
     async def get_entity(

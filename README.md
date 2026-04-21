@@ -78,6 +78,7 @@ ruff check .
 - `index_readthedocs`: crawl and index a docs tree
 - `search`: full-text search over indexed pages
 - `search_entities`: search structured Sphinx classes and methods
+- `lookup_symbol`: find one structured symbol and return its page, anchor, line range, and short context
 - `get_entity`: fetch one structured class or method by `entity_id`
 - `list_class_methods`: list methods for a structured class
 - `get_entity_context`: search one entity and return its params and notes/warnings context
@@ -174,6 +175,11 @@ queries such as `LayoutView`, then `get_entity` or `list_class_methods` for
 structured class/method details. Existing databases get the new schema
 automatically, but structured entities are populated only when a page is crawled
 again.
+
+If you already know an API symbol such as `discord.ui.LayoutView`, use
+`lookup_symbol(source_base, symbol_name)` first. It returns the page URL, anchor,
+line range, and a compact context window in one call. Use `get_entity` afterward
+only when you need full structured params, notes, or child methods.
 
 ## Notes
 

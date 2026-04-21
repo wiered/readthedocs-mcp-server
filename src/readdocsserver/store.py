@@ -676,6 +676,74 @@ class EntityHit:
     parent_entity_id: str | None = None
 
 
+_LOOKUP_CONTEXT_BEFORE = 8
+_LOOKUP_CONTEXT_AFTER = 16
+
+
+def _empty_symbol_lookup(symbol_name: str) -> dict[str, Any]:
+    return {
+        "found": False,
+        "symbol_name": symbol_name,
+        "page_url": None,
+        "anchor": None,
+        "url_with_anchor": None,
+        "kind": None,
+        "name": None,
+        "qualname": None,
+        "line_start": None,
+        "line_end": None,
+        "context_start": None,
+        "context_end": None,
+        "context": "",
+        "summary": "",
+        "entity_id": None,
+    }
+
+
+def _slice_lookup_context(
+    body: str, line_start: int | None, line_end: int | None
+) -> tuple[str, int | None, int | None]:
+    if line_start is None or line_end is None:
+        return "", None, None
+    lines = body.splitlines()
+    if not lines:
+        return "", None, None
+    start = max(1, line_start - _LOOKUP_CONTEXT_BEFORE)
+    end = min(len(lines), max(line_start, line_end) + _LOOKUP_CONTEXT_AFTER)
+    return "\n".join(lines[start - 1 : end]), start, end
+
+
+def _symbol_lookup_from_row(row: sqlite3.Row, page_body: str | None) -> dict[str, Any]:
+    line_start = row["line_start"]
+    line_end = row["line_end"]
+    context, context_start, context_end = _slice_lookup_context(
+        page_body or "", line_start, line_end
+    )
+    if not context:
+        context = str(row["body_text"] or row["summary"] or "")
+        context_start = None
+        context_end = None
+    anchor = row["anchor"]
+    page_url = str(row["page_url"])
+    return {
+        "found": True,
+        "symbol_name": str(row["qualname"] or row["name"]),
+        "page_url": page_url,
+        "anchor": anchor,
+        "url_with_anchor": f"{page_url}#{anchor}" if anchor else page_url,
+        "kind": row["kind"],
+        "name": row["name"],
+        "qualname": row["qualname"],
+        "line_start": line_start,
+        "line_end": line_end,
+        "context_start": context_start,
+        "context_end": context_end,
+        "context": context,
+        "summary": row["summary"],
+        "entity_id": row["entity_id"],
+    }
+
+
 class DocIndex:
     """Thread-safe wrapper around SQLite + FTS5."""
 
@@ -1310,6 +1378,66 @@ class DocIndex:
             include_params=True,
             include_notes=include_notes,
         )
+
+    def lookup_symbol(self, source_base: str, symbol_name: str) -> dict[str, Any]:
+        symbol = symbol_name.strip()
+        if not symbol:
+            return _empty_symbol_lookup(symbol)
+
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT e.entity_id, e.source_base, e.page_url, e.anchor,
+                           e.kind, e.name, e.qualname, e.signature, e.summary,
+                           e.body_text, e.parent_entity_id, e.line_start, e.line_end,
+                           p.body AS page_body
+                    FROM doc_entities AS e
+                    LEFT JOIN pages AS p ON p.url = e.page_url
+                    WHERE e.source_base = ?
+                      AND (e.qualname = ? OR e.anchor = ? OR e.name = ?)
+                    ORDER BY
+                        CASE
+                            WHEN e.qualname = ? THEN 0
+                            WHEN e.anchor = ? THEN 1
+                            ELSE 2
+                        END,
+                        LENGTH(e.qualname),
+                        e.qualname
+                    LIMIT 1
+                    """,
+                    (source_base, symbol, symbol, symbol, symbol, symbol),
+                ).fetchone()
+                if row is not None:
+                    return _symbol_lookup_from_row(row, row["page_body"])
+            finally:
+                conn.close()
+
+        hits = self.search_entities(symbol, limit=1, source_base=source_base)
+        if not hits:
+            return _empty_symbol_lookup(symbol)
+
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT e.entity_id, e.source_base, e.page_url, e.anchor,
+                           e.kind, e.name, e.qualname, e.signature, e.summary,
+                           e.body_text, e.parent_entity_id, e.line_start, e.line_end,
+                           p.body AS page_body
+                    FROM doc_entities AS e
+                    LEFT JOIN pages AS p ON p.url = e.page_url
+                    WHERE e.entity_id = ?
+                    """,
+                    (hits[0].entity_id,),
+                ).fetchone()
+                if row is None:
+                    return _empty_symbol_lookup(symbol)
+                return _symbol_lookup_from_row(row, row["page_body"])
+            finally:
+                conn.close()
 
     @staticmethod
     def _get_entity_row(

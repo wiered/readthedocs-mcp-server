@@ -43,6 +43,12 @@ def test_optional_entity_kind() -> None:
         main._optional_entity_kind("function")
 
 
+def test_validate_symbol_name() -> None:
+    assert main._validate_symbol_name(" discord.ui.LayoutView ") == "discord.ui.LayoutView"
+    with pytest.raises(ValueError, match="symbol_name"):
+        main._validate_symbol_name("  ")
+
+
 def test_validate_list_pages_limit() -> None:
     assert main._validate_list_pages_limit(1) == 1
     assert main._validate_list_pages_limit(500) == 500
@@ -173,3 +179,31 @@ def test_entity_detail_model_conversion() -> None:
     assert detail.notes[0].kind == "versionadded"
     assert detail.methods[0].params[0].name == "text"
     assert detail.methods[0].notes[0].kind == "warning"
+
+
+def test_symbol_lookup_model_conversion() -> None:
+    response = main.LookupSymbolResponse(
+        result=main.SymbolLookupResult.model_validate(
+            {
+                "found": True,
+                "symbol_name": "discord.ui.LayoutView",
+                "page_url": "https://docs.example/api.html",
+                "anchor": "discord.ui.LayoutView",
+                "url_with_anchor": "https://docs.example/api.html#discord.ui.LayoutView",
+                "kind": "class",
+                "name": "LayoutView",
+                "qualname": "discord.ui.LayoutView",
+                "line_start": 10,
+                "line_end": 12,
+                "context_start": 2,
+                "context_end": 28,
+                "context": "class discord.ui.LayoutView",
+                "summary": "Layout container.",
+                "entity_id": "https://docs.example/api.html#discord.ui.LayoutView",
+            }
+        )
+    )
+
+    assert response.result.url_with_anchor.endswith("#discord.ui.LayoutView")
+    assert response.result.line_start == 10
+    assert response.result.context_start == 2
