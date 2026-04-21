@@ -30,9 +30,7 @@ def delete_entities_for_page(conn: sqlite3.Connection, url: str) -> None:
     ).fetchall()
     entity_ids = [row["entity_id"] for row in entity_rows]
     for entity_id in entity_ids:
-        conn.execute(
-            "DELETE FROM doc_entities_fts WHERE entity_id = ?", (entity_id,)
-        )
+        conn.execute("DELETE FROM doc_entities_fts WHERE entity_id = ?", (entity_id,))
     conn.execute(
         "DELETE FROM doc_entity_params WHERE entity_id IN "
         "(SELECT entity_id FROM doc_entities WHERE page_url = ?)",
@@ -312,9 +310,7 @@ def search_entities_fts(
         return []
 
 
-def get_entity_row(
-    conn: sqlite3.Connection, entity_id: str
-) -> dict[str, Any] | None:
+def get_entity_row(conn: sqlite3.Connection, entity_id: str) -> dict[str, Any] | None:
     row = conn.execute(
         """
         SELECT entity_id, source_base, page_url, anchor, kind, name, qualname,

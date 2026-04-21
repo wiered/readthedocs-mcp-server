@@ -44,7 +44,9 @@ def test_optional_entity_kind() -> None:
 
 
 def test_validate_symbol_name() -> None:
-    assert main._validate_symbol_name(" discord.ui.LayoutView ") == "discord.ui.LayoutView"
+    assert (
+        main._validate_symbol_name(" discord.ui.LayoutView ") == "discord.ui.LayoutView"
+    )
     with pytest.raises(ValueError, match="symbol_name"):
         main._validate_symbol_name("  ")
 
@@ -70,7 +72,10 @@ def test_optional_source_base() -> None:
     assert main._optional_source_base(None) is None
     assert main._optional_source_base("  ") is None
     assert main._optional_source_base(" https://x/ ") == "https://x/"
-    assert main._optional_source_base("https://x.com/en/latest") == "https://x.com/en/latest/"
+    assert (
+        main._optional_source_base("https://x.com/en/latest")
+        == "https://x.com/en/latest/"
+    )
     assert (
         main._optional_source_base("https://x.com/en/latest/page.html")
         == "https://x.com/en/latest/"

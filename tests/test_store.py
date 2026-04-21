@@ -141,7 +141,9 @@ def test_doc_index_page_toc_roundtrip_and_replace(tmp_path: Path) -> None:
 
 def test_doc_index_page_toc_defaults_to_empty(tmp_path: Path) -> None:
     idx = DocIndex(tmp_path / "db.sqlite")
-    idx.upsert_page("https://docs.example/page.html", "Page", "body", "https://docs.example/", 1)
+    idx.upsert_page(
+        "https://docs.example/page.html", "Page", "body", "https://docs.example/", 1
+    )
 
     pages, _ = idx.list_pages(source_base="https://docs.example/")
 
@@ -213,11 +215,18 @@ def test_doc_index_structured_entities_roundtrip(tmp_path: Path) -> None:
                     "kind": "deprecated",
                     "version": "1.4",
                     "text": "Use update_message.",
-                }
+                },
             ],
         },
     ]
-    idx.upsert_page(url, "API", "LayoutView\n\nedit_message(text: str)", "https://docs.example/", 1, entities)
+    idx.upsert_page(
+        url,
+        "API",
+        "LayoutView\n\nedit_message(text: str)",
+        "https://docs.example/",
+        1,
+        entities,
+    )
 
     hits = idx.search_entities("LayoutView", kind="class", limit=5)
     assert len(hits) == 1
@@ -228,7 +237,9 @@ def test_doc_index_structured_entities_roundtrip(tmp_path: Path) -> None:
     assert entity["notes"][0]["kind"] == "versionadded"
     assert [m["name"] for m in entity["methods"]] == ["edit_message"]
 
-    version_hits = idx.search_entities("versionadded 1.2 Initial", kind="class", limit=5)
+    version_hits = idx.search_entities(
+        "versionadded 1.2 Initial", kind="class", limit=5
+    )
     assert len(version_hits) == 1
     assert version_hits[0].name == "LayoutView"
 

@@ -530,7 +530,9 @@ def _entity_from_py_object(
     name = _signature_name(sig, signature, anchor)
     qualname = anchor or _qualname_from_signature(signature) or name
     local_id = anchor or f"{kind}:{qualname}:{ordinal}"
-    dds = [child for child in dl.find_all("dd", recursive=False) if isinstance(child, Tag)]
+    dds = [
+        child for child in dl.find_all("dd", recursive=False) if isinstance(child, Tag)
+    ]
     body_blocks = [_render_entity_body(dd) for dd in dds]
     body_text = "\n\n".join(block for block in body_blocks if block)
     summary = _entity_summary(dds, body_text)
@@ -567,7 +569,9 @@ def _signature_name(sig: Tag, signature: str, anchor: str | None) -> str:
 
 def _qualname_from_signature(signature: str) -> str | None:
     head = signature.split("(", 1)[0].strip()
-    head = re.sub(r"^(async|abstract|abstractmethod|classmethod|staticmethod|class)\s+", "", head)
+    head = re.sub(
+        r"^(async|abstract|abstractmethod|classmethod|staticmethod|class)\s+", "", head
+    )
     return head or None
 
 
@@ -604,7 +608,9 @@ def _params_from_signature(sig: Tag) -> list[dict]:
         if ":" in text:
             after_colon = text.split(":", 1)[1]
             if "=" in after_colon:
-                type_text, default = [part.strip() for part in after_colon.split("=", 1)]
+                type_text, default = [
+                    part.strip() for part in after_colon.split("=", 1)
+                ]
             else:
                 type_text = after_colon.strip()
         elif "=" in text:
@@ -794,7 +800,9 @@ def _attach_body_lines(entities: list[dict], body: str) -> None:
             if needle in line or (name and name in line):
                 line_no = idx + 1
                 entity["line_start"] = line_no
-                entity["line_end"] = line_no + max(0, str(entity.get("body_text") or "").count("\n"))
+                entity["line_end"] = line_no + max(
+                    0, str(entity.get("body_text") or "").count("\n")
+                )
                 used[key] = idx + 1
                 break
 

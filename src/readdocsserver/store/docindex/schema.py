@@ -110,11 +110,11 @@ def init_schema(conn: sqlite3.Connection) -> None:
     legacy = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pages_fts'"
     ).fetchone()
-    page_cols = {row["name"] for row in conn.execute("PRAGMA table_info(pages)").fetchall()}
+    page_cols = {
+        row["name"] for row in conn.execute("PRAGMA table_info(pages)").fetchall()
+    }
     if "toc_json" not in page_cols:
-        conn.execute(
-            "ALTER TABLE pages ADD COLUMN toc_json TEXT NOT NULL DEFAULT '[]'"
-        )
+        conn.execute("ALTER TABLE pages ADD COLUMN toc_json TEXT NOT NULL DEFAULT '[]'")
     chunk_cols = {
         row["name"]
         for row in conn.execute("PRAGMA table_info(search_chunks)").fetchall()
