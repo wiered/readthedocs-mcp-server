@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from bs4 import BeautifulSoup, Tag
 
 from readdocsserver.crawl import (
     _parse_sitemap_urls,
@@ -14,6 +15,19 @@ from readdocsserver.crawl import (
     same_site_links,
     under_prefix,
 )
+from readdocsserver.crawl.render import _find_main_content
+from readdocsserver.crawl.runner import _decompose_soup
+
+
+def _parsed_page(html: bytes) -> tuple[BeautifulSoup, Tag]:
+    soup = _decompose_soup(html)
+    return soup, _find_main_content(soup)
+
+
+def _extract_text(html: bytes, page_url: str) -> tuple[str, str, Tag]:
+    soup, main = _parsed_page(html)
+    title, text = extract_text_and_title(soup, main, page_url)
+    return title, text, main
 
 
 @pytest.mark.parametrize(
@@ -76,7 +90,7 @@ def test_parse_sitemap_index() -> None:
 def test_extract_text_rst_content() -> None:
     html = b"""<!doctype html><html><head><title>API</title></head>
 <body><div class="rst-content"><p>Hello</p><script>removed()</script></div></body></html>"""
-    title, text = extract_text_and_title(html, "https://x/")
+    title, text, _ = _extract_text(html, "https://x/")
     assert title == "API"
     assert "Hello" in text
     assert "removed" not in text
@@ -99,7 +113,8 @@ def test_extract_page_toc_nested_sections_and_summaries() -> None:
   </section>
 </div></body></html>"""
 
-    toc = extract_page_toc(html, "https://docs.example/page.html")
+    _, main = _parsed_page(html)
+    toc = extract_page_toc(main, "https://docs.example/page.html")
 
     assert toc == [
         {
@@ -146,7 +161,8 @@ def test_extract_page_toc_ignores_missing_id_heading_and_nested_paragraph() -> N
   </div>
 </article></body></html>"""
 
-    toc = extract_page_toc(html, "https://docs.example/async.html")
+    _, main = _parsed_page(html)
+    toc = extract_page_toc(main, "https://docs.example/async.html")
 
     assert toc[0]["id"] == "asynctelebot"
     assert toc[0]["summary"] == ""
@@ -189,7 +205,7 @@ def test_extract_text_sphinx_signature_and_field_list() -> None:
     </dl>
   </article>
 </body></html>"""
-    title, text = extract_text_and_title(html, "https://x/")
+    title, text, _ = _extract_text(html, "https://x/")
     assert title == "API"
     assert "send_photo(chat_id: int | str, photo: Any | str) → Message" in text
     assert "chat_id(int or str) – Chat id." in text
@@ -239,8 +255,8 @@ def test_extract_structured_entities_class_method_params_and_notes() -> None:
     </dl>
   </article>
 </body></html>"""
-    title, text = extract_text_and_title(html, "https://x/api.html")
-    entities = extract_structured_entities(html, "https://x/api.html", text)
+    title, text, main = _extract_text(html, "https://x/api.html")
+    entities = extract_structured_entities(main, "https://x/api.html", text)
 
     assert title == "API"
     assert len(entities) == 2
@@ -282,8 +298,8 @@ def test_extract_structured_entities_xref_candidates() -> None:
       </dl>
     </article></body></html>"""
 
-    _, text = extract_text_and_title(html, "https://docs.example/api.html")
-    entities = extract_structured_entities(html, "https://docs.example/api.html", text)
+    _, text, main = _extract_text(html, "https://docs.example/api.html")
+    entities = extract_structured_entities(main, "https://docs.example/api.html", text)
     xrefs = entities[0]["xrefs"]
 
     assert {xref["edge_type"] for xref in xrefs} >= {
@@ -298,6 +314,152 @@ def test_extract_structured_entities_xref_candidates() -> None:
         "pkg.View",
         "pkg.Legacy",
     }
+
+
+def test_extract_structured_entities_isolates_nested_method_metadata() -> None:
+    html = b"""<!doctype html><html><body><article role="main">
+      <dl class="py class">
+        <dt class="sig sig-object py" id="pkg.Container">
+          <span class="sig-name descname"><span class="pre">Container</span></span>
+        </dt>
+        <dd>
+          <p>Container summary.</p>
+          <div class="admonition note"><p>Class note.</p></div>
+          <dl class="py method">
+            <dt class="sig sig-object py" id="pkg.Container.do">
+              <span class="sig-name descname"><span class="pre">do</span></span>
+              <span class="sig-paren">(</span>
+              <em class="sig-param"><span class="n"><span class="pre">item</span></span></em>
+              <span class="sig-paren">)</span>
+            </dt>
+            <dd>
+              <p>Do work with <a href="#pkg.Worker">Worker</a>.</p>
+              <dl class="field-list simple">
+                <dt>Parameters<span class="colon">:</span></dt>
+                <dd><ul class="simple">
+                  <li><p><strong>item</strong> (<code>str</code>) - Method item.</p></li>
+                </ul></dd>
+              </dl>
+              <div class="admonition warning"><p>Method warning.</p></div>
+            </dd>
+          </dl>
+        </dd>
+      </dl>
+    </article></body></html>"""
+
+    _, text, main = _extract_text(html, "https://docs.example/api.html")
+    cls, method = extract_structured_entities(
+        main, "https://docs.example/api.html", text
+    )
+
+    assert cls["local_id"] == "pkg.Container"
+    assert cls["params"] == []
+    assert [note["kind"] for note in cls["notes"]] == ["note"]
+    assert "Class note." in cls["notes"][0]["text"]
+    assert cls["xrefs"] == []
+    assert method["parent_local_id"] == cls["local_id"]
+    assert [param["name"] for param in method["params"]] == ["item"]
+    assert method["params"][0]["description"] == "Method item."
+    assert {note["kind"] for note in method["notes"]} == {"warning"}
+    assert {xref["target_anchor"] for xref in method["xrefs"]} == {"pkg.Worker"}
+
+
+def test_extract_structured_entities_keeps_direct_class_metadata_separate() -> None:
+    html = b"""<!doctype html><html><body><article role="main">
+      <dl class="py class">
+        <dt class="sig sig-object py" id="pkg.Container">
+          <span class="sig-name descname"><span class="pre">Container</span></span>
+        </dt>
+        <dd>
+          <p>Container summary.</p>
+          <dl class="field-list simple">
+            <dt>Parameters<span class="colon">:</span></dt>
+            <dd><ul class="simple">
+              <li><p><strong>name</strong> (<code>str</code>) - Container name.</p></li>
+            </ul></dd>
+            <dt>See also<span class="colon">:</span></dt>
+            <dd><p><a href="#pkg.Other">Other</a></p></dd>
+          </dl>
+          <div class="admonition warning"><p>Class warning.</p></div>
+          <dl class="py method">
+            <dt class="sig sig-object py" id="pkg.Container.do">
+              <span class="sig-name descname"><span class="pre">do</span></span>
+            </dt>
+            <dd>
+              <p>Do work with <a href="#pkg.Worker">Worker</a>.</p>
+              <dl class="field-list simple">
+                <dt>Parameters<span class="colon">:</span></dt>
+                <dd><ul class="simple">
+                  <li><p><strong>item</strong> (<code>str</code>) - Method item.</p></li>
+                </ul></dd>
+              </dl>
+              <div class="admonition note"><p>Method note.</p></div>
+            </dd>
+          </dl>
+        </dd>
+      </dl>
+    </article></body></html>"""
+
+    _, text, main = _extract_text(html, "https://docs.example/api.html")
+    cls, method = extract_structured_entities(
+        main, "https://docs.example/api.html", text
+    )
+
+    assert [param["name"] for param in cls["params"]] == ["name"]
+    assert cls["params"][0]["description"] == "Container name."
+    assert {note["kind"] for note in cls["notes"]} == {"warning"}
+    assert {xref["edge_type"] for xref in cls["xrefs"]} == {"see_also"}
+    assert {xref["target_anchor"] for xref in cls["xrefs"]} == {"pkg.Other"}
+    assert [param["name"] for param in method["params"]] == ["item"]
+    assert {note["kind"] for note in method["notes"]} == {"note"}
+    assert {xref["target_anchor"] for xref in method["xrefs"]} == {"pkg.Worker"}
+
+
+def test_extract_structured_entities_handles_many_nested_methods_without_leaks() -> None:
+    methods = "\n".join(
+        f"""
+        <dl class="py method">
+          <dt class="sig sig-object py" id="pkg.Container.method_{i}">
+            <span class="sig-name descname"><span class="pre">method_{i}</span></span>
+          </dt>
+          <dd>
+            <p>Method {i} summary.</p>
+            <dl class="field-list simple">
+              <dt>Parameters<span class="colon">:</span></dt>
+              <dd><ul class="simple">
+                <li><p><strong>value_{i}</strong> (<code>str</code>) - Value {i}.</p></li>
+              </ul></dd>
+            </dl>
+          </dd>
+        </dl>
+        """
+        for i in range(3)
+    )
+    html = f"""<!doctype html><html><body><article role="main">
+      <dl class="py class">
+        <dt class="sig sig-object py" id="pkg.Container">
+          <span class="sig-name descname"><span class="pre">Container</span></span>
+        </dt>
+        <dd>
+          <p>Container summary.</p>
+          {methods}
+        </dd>
+      </dl>
+    </article></body></html>""".encode()
+
+    _, text, main = _extract_text(html, "https://docs.example/api.html")
+    entities = extract_structured_entities(main, "https://docs.example/api.html", text)
+
+    cls = entities[0]
+    methods_out = entities[1:]
+    assert len(entities) == 4
+    assert cls["params"] == []
+    assert all(method["parent_local_id"] == cls["local_id"] for method in methods_out)
+    assert [[param["name"] for param in method["params"]] for method in methods_out] == [
+        ["value_0"],
+        ["value_1"],
+        ["value_2"],
+    ]
 
 
 def test_same_site_links_filters_prefix() -> None:

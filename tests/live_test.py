@@ -52,7 +52,6 @@ def _tool_structured(result: Any) -> dict[str, Any]:
 
 
 def _live_enabled() -> bool:
-    return True
     return os.environ.get("READTHEDOCS_MCP_RUN_LIVE", "").strip() == "1"
 
 

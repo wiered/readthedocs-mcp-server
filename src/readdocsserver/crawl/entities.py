@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from dataclasses import dataclass
 import re
 from urllib.parse import urldefrag, urljoin
 
@@ -30,6 +32,15 @@ _VERSION_RE = re.compile(
 )
 
 
+@dataclass(slots=True)
+class _AnalyzedDd:
+    body_text: str
+    summary: str
+    params: list[dict]
+    notes: list[dict]
+    xrefs: list[dict]
+
+
 def _py_object_kind(dl: Tag) -> str | None:
     classes = set(dl.get("class", []))
     if "class" in classes:
@@ -41,30 +52,59 @@ def _py_object_kind(dl: Tag) -> str | None:
 
 def _extract_py_entities(root: Tag, page_url: str) -> list[dict]:
     entities: list[dict] = []
+    dd_cache: dict[int, _AnalyzedDd] = {}
 
-    def walk(node: Tag, parent_local_id: str | None) -> None:
-        for child in node.children:
+    def walk(
+        node: Tag,
+        parent_local_id: str | None,
+        use_tqdm: bool = False,
+        recurse_level: int = 0,
+    ) -> None:
+        # Only use tqdm() to wrap node.children if use_tqdm is True
+        children_iter = node.children
+        if use_tqdm:
+            try:
+                from tqdm import tqdm
+
+                desk = "Extracting entities: {}".format(node.name)
+
+                children_iter = tqdm(list(node.children), desc=desk)
+            except ImportError:
+                pass  # tqdm not available; just use default
+        for child in children_iter:
             if not isinstance(child, Tag):
+                # print("{}not a tag".format("\t" * (recurse_level + 1)))
                 continue
             if _is_py_object(child):
                 entity = _entity_from_py_object(
-                    child, parent_local_id, len(entities), page_url
+                    child, parent_local_id, len(entities), page_url, dd_cache
                 )
                 current_parent = parent_local_id
                 if entity is not None:
                     entities.append(entity)
                     current_parent = str(entity["local_id"])
                 for dd in child.find_all("dd", recursive=False):
-                    walk(dd, current_parent)
+                    walk(
+                        dd,
+                        current_parent,
+                        use_tqdm=False,
+                        recurse_level=recurse_level + 1,
+                    )
                 continue
-            walk(child, parent_local_id)
+            walk(
+                child, parent_local_id, use_tqdm=False, recurse_level=recurse_level + 1
+            )
 
-    walk(root, None)
+    walk(root, None, use_tqdm=True, recurse_level=0)
     return entities
 
 
 def _entity_from_py_object(
-    dl: Tag, parent_local_id: str | None, ordinal: int, page_url: str
+    dl: Tag,
+    parent_local_id: str | None,
+    ordinal: int,
+    page_url: str,
+    dd_cache: dict[int, _AnalyzedDd],
 ) -> dict | None:
     kind = _py_object_kind(dl)
     if kind is None:
@@ -80,9 +120,19 @@ def _entity_from_py_object(
     dds = [
         child for child in dl.find_all("dd", recursive=False) if isinstance(child, Tag)
     ]
-    body_blocks = [_render_entity_body(dd) for dd in dds]
-    body_text = "\n\n".join(block for block in body_blocks if block)
-    summary = _entity_summary(dds, body_text)
+    dd_analyses = [_analyze_entity_dd(dd, page_url, dd_cache) for dd in dds]
+    body_text = "\n\n".join(
+        analysis.body_text for analysis in dd_analyses if analysis.body_text
+    )
+    summary = next(
+        (analysis.summary for analysis in dd_analyses if analysis.summary), ""
+    )
+    field_params = [param for analysis in dd_analyses for param in analysis.params]
+    notes = [note.copy() for analysis in dd_analyses for note in analysis.notes]
+    for i, note in enumerate(notes):
+        note["ord"] = i
+    sig_xrefs = _extract_xrefs_from_container(sig, page_url)
+    dd_xrefs = [xref for analysis in dd_analyses for xref in analysis.xrefs]
     return {
         "local_id": local_id,
         "parent_local_id": parent_local_id,
@@ -95,9 +145,9 @@ def _entity_from_py_object(
         "body_text": body_text,
         "line_start": None,
         "line_end": None,
-        "params": _extract_entity_params(sig, dds),
-        "notes": _extract_entity_notes(dds),
-        "xrefs": _extract_entity_xrefs(sig, dds, page_url),
+        "params": _merge_entity_params(sig, field_params),
+        "notes": notes,
+        "xrefs": _dedupe_xrefs([*sig_xrefs, *dd_xrefs]),
     }
 
 
@@ -123,14 +173,15 @@ def _qualname_from_signature(signature: str) -> str | None:
     return head or None
 
 
-def _extract_entity_params(sig: Tag, dds: list[Tag]) -> list[dict]:
+def _merge_entity_params(sig: Tag, field_params: list[dict]) -> list[dict]:
     params = _params_from_signature(sig)
     by_name = {p["name"]: p for p in params}
-    for param in _params_from_field_lists(dds):
+    for param in field_params:
         existing = by_name.get(param["name"])
         if existing is None:
-            by_name[param["name"]] = param
-            params.append(param)
+            new_param = param.copy()
+            by_name[new_param["name"]] = new_param
+            params.append(new_param)
             continue
         if param.get("type") and not existing.get("type"):
             existing["type"] = param["type"]
@@ -175,25 +226,23 @@ def _params_from_signature(sig: Tag) -> list[dict]:
     return params
 
 
-def _params_from_field_lists(dds: list[Tag]) -> list[dict]:
+def _params_from_field_list(field: Tag) -> list[dict]:
     params: list[dict] = []
-    for dd in dds:
-        for field in dd.find_all("dl", class_="field-list"):
-            children = [child for child in field.children if isinstance(child, Tag)]
-            i = 0
-            while i < len(children):
-                dt = children[i]
-                value = children[i + 1] if i + 1 < len(children) else None
-                i += 2
-                if dt.name != "dt" or not isinstance(value, Tag) or value.name != "dd":
-                    continue
-                label = _inline_text(dt).rstrip(":").lower()
-                if label != "parameters":
-                    continue
-                for item in _render_field_list_items(value):
-                    parsed = _parse_parameter_item(item)
-                    if parsed:
-                        params.append(parsed)
+    children = [child for child in field.children if isinstance(child, Tag)]
+    i = 0
+    while i < len(children):
+        dt = children[i]
+        value = children[i + 1] if i + 1 < len(children) else None
+        i += 2
+        if dt.name != "dt" or not isinstance(value, Tag) or value.name != "dd":
+            continue
+        label = _inline_text(dt).rstrip(":").lower()
+        if label != "parameters":
+            continue
+        for item in _render_field_list_items(value):
+            parsed = _parse_parameter_item(item)
+            if parsed:
+                params.append(parsed)
     return params
 
 
@@ -210,101 +259,80 @@ def _parse_parameter_item(text: str) -> dict | None:
     }
 
 
-def _extract_entity_notes(dds: list[Tag]) -> list[dict]:
-    notes: list[dict] = []
-    for dd in dds:
-        for node in dd.find_all(["div", "p"], recursive=True):
-            if _has_structural_note_ancestor(node, dd):
-                continue
-            classes = set(node.get("class", []))
-            kind = None
-            version = ""
-            if "warning" in classes:
-                kind = "warning"
-            elif "note" in classes:
-                kind = "note"
-            elif "versionadded" in classes:
+def _note_from_node(node: Tag, boundary: Tag, ord_: int) -> dict | None:
+    if _has_structural_note_ancestor(node, boundary):
+        return None
+    classes = set(node.get("class", []))
+    kind = None
+    version = ""
+    if "warning" in classes:
+        kind = "warning"
+    elif "note" in classes:
+        kind = "note"
+    elif "versionadded" in classes:
+        kind = "versionadded"
+    elif "versionchanged" in classes:
+        kind = "versionchanged"
+    elif "versionremoved" in classes:
+        kind = "versionremoved"
+    elif "deprecated" in classes:
+        kind = "deprecated"
+    elif "admonition" in classes:
+        kind = "admonition"
+    text = _inline_text(node)
+    if not kind:
+        m = _VERSION_RE.match(text)
+        if m:
+            label = m.group("label")
+            if label == "Added":
                 kind = "versionadded"
-            elif "versionchanged" in classes:
+            elif label == "Changed":
                 kind = "versionchanged"
-            elif "versionremoved" in classes:
+            elif label == "Removed":
                 kind = "versionremoved"
-            elif "deprecated" in classes:
+            else:
                 kind = "deprecated"
-            elif "admonition" in classes:
-                kind = "admonition"
-            text = _inline_text(node)
-            if not kind:
-                m = _VERSION_RE.match(text)
-                if m:
-                    label = m.group("label")
-                    if label == "Added":
-                        kind = "versionadded"
-                    elif label == "Changed":
-                        kind = "versionchanged"
-                    elif label == "Removed":
-                        kind = "versionremoved"
-                    else:
-                        kind = "deprecated"
-                    version = (
-                        m.group("version") or m.group("deprecated_version") or ""
-                    ).strip()
-                    text = (
-                        m.group("text") or m.group("deprecated_text") or ""
-                    ).strip() or text
-            if kind and text:
-                if kind.startswith("version") and not version:
-                    m = _VERSION_RE.match(text)
-                    if m:
-                        version = (
-                            m.group("version") or m.group("deprecated_version") or ""
-                        ).strip()
-                        text = (
-                            m.group("text") or m.group("deprecated_text") or ""
-                        ).strip() or text
-                elif kind == "deprecated" and not version:
-                    m = _VERSION_RE.match(text)
-                    if m:
-                        version = (
-                            m.group("version") or m.group("deprecated_version") or ""
-                        ).strip()
-                        text = (
-                            m.group("text") or m.group("deprecated_text") or ""
-                        ).strip() or text
-                notes.append(
-                    {
-                        "ord": len(notes),
-                        "kind": kind,
-                        "version": version,
-                        "text": text,
-                    }
-                )
-    return notes
+            version = (m.group("version") or m.group("deprecated_version") or "").strip()
+            text = (m.group("text") or m.group("deprecated_text") or "").strip() or text
+    if not kind or not text:
+        return None
+    if (kind.startswith("version") or kind == "deprecated") and not version:
+        m = _VERSION_RE.match(text)
+        if m:
+            version = (m.group("version") or m.group("deprecated_version") or "").strip()
+            text = (m.group("text") or m.group("deprecated_text") or "").strip() or text
+    return {
+        "ord": ord_,
+        "kind": kind,
+        "version": version,
+        "text": text,
+    }
 
 
-def _extract_entity_xrefs(sig: Tag, dds: list[Tag], page_url: str) -> list[dict]:
+def _extract_xrefs_from_container(container: Tag, page_url: str) -> list[dict]:
     xrefs: list[dict] = []
-    for container in [sig, *dds]:
-        for link in container.find_all("a", href=True):
-            if "headerlink" in link.get("class", []):
-                continue
-            target_url, target_anchor = _xref_target(str(link["href"]), page_url)
-            if not target_anchor:
-                continue
-            snippet = _xref_snippet(link)
-            edge_type = _xref_edge_type(link)
-            xrefs.append(
-                {
-                    "edge_type": edge_type,
-                    "source_kind": "xref",
-                    "target_url": target_url,
-                    "target_anchor": target_anchor,
-                    "target_name": _inline_text(link, compact=True),
-                    "snippet": snippet,
-                    "confidence": 1.0,
-                }
-            )
-    return _dedupe_xrefs(xrefs)
+    for link in container.find_all("a", href=True):
+        xref = _xref_from_link(link, page_url)
+        if xref is not None:
+            xrefs.append(xref)
+    return xrefs
+
+
+def _xref_from_link(link: Tag, page_url: str) -> dict | None:
+    if "headerlink" in link.get("class", []):
+        return None
+    target_url, target_anchor = _xref_target(str(link["href"]), page_url)
+    if not target_anchor:
+        return None
+    return {
+        "edge_type": _xref_edge_type(link),
+        "source_kind": "xref",
+        "target_url": target_url,
+        "target_anchor": target_anchor,
+        "target_name": _inline_text(link, compact=True),
+        "snippet": _xref_snippet(link),
+        "confidence": 1.0,
+    }
 
 
 def _xref_target(href: str, page_url: str) -> tuple[str, str]:
@@ -407,13 +435,65 @@ def _render_entity_body(dd: Tag) -> str:
     return "\n\n".join(block for block in blocks if block.strip())
 
 
-def _entity_summary(dds: list[Tag], body_text: str) -> str:
-    for dd in dds:
-        for child in dd.children:
-            if isinstance(child, Tag) and child.name == "p":
-                text = _inline_text(child)
-                if text:
-                    return text
+def _analyze_entity_dd(
+    dd: Tag, page_url: str, cache: dict[int, _AnalyzedDd]
+) -> _AnalyzedDd:
+    cache_key = id(dd)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    body_text = _render_entity_body(dd)
+    summary = _summary_from_dd(dd) or _summary_from_body(body_text)
+    params: list[dict] = []
+    notes: list[dict] = []
+    xrefs: list[dict] = []
+
+    for node in _iter_entity_content_tags(dd):
+        if _is_field_list(node):
+            params.extend(_params_from_field_list(node))
+        if node.name in {"div", "p"}:
+            note = _note_from_node(node, dd, len(notes))
+            if note is not None:
+                notes.append(note)
+        if node.name == "a" and node.has_attr("href"):
+            xref = _xref_from_link(node, page_url)
+            if xref is not None:
+                xrefs.append(xref)
+
+    analyzed = _AnalyzedDd(
+        body_text=body_text,
+        summary=summary,
+        params=params,
+        notes=notes,
+        xrefs=_dedupe_xrefs(xrefs),
+    )
+    cache[cache_key] = analyzed
+    return analyzed
+
+
+def _iter_entity_content_tags(dd: Tag) -> Iterator[Tag]:
+    children = [child for child in dd.children if isinstance(child, Tag)]
+    stack = list(reversed(children))
+    while stack:
+        node = stack.pop()
+        if _is_py_object(node):
+            continue
+        yield node
+        child_tags = [child for child in node.children if isinstance(child, Tag)]
+        stack.extend(reversed(child_tags))
+
+
+def _summary_from_dd(dd: Tag) -> str:
+    for child in dd.children:
+        if isinstance(child, Tag) and child.name == "p":
+            text = _inline_text(child)
+            if text:
+                return text
+    return ""
+
+
+def _summary_from_body(body_text: str) -> str:
     for line in body_text.splitlines():
         if line.strip():
             return line.strip()

@@ -37,7 +37,7 @@ from readdocsserver.services import indexing  # noqa: E402
 from readdocsserver.services.deps import get_doc_index  # noqa: E402
 
 
-DEFAULT_SEED_URL = "https://discordpy.readthedocs.io/en/stable/api.html"
+DEFAULT_SEED_URL = "https://docs.readthedocs.com/platform/stable/index.html"
 DEFAULT_DB_PATH = Path(tempfile.gettempdir()) / "readdocs-mcp-live-debug.sqlite"
 
 

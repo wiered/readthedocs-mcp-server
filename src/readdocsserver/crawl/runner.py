@@ -169,8 +169,6 @@ async def crawl_readthedocs(
             main = _find_main_content(decomposed_soup)
 
             title, body = extract_text_and_title(decomposed_soup, main, str(resp.url))
-            print(f"extracted title: {title}")
-            return
             entities = extract_structured_entities(main, str(resp.url), body)
             toc = extract_page_toc(main, final_url)
 

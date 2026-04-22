@@ -210,3 +210,6 @@ __marimo__/
 
 # My stuff
 dev_docs/
+
+# trace files
+*_trace.json
