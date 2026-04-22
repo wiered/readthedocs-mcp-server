@@ -191,7 +191,9 @@ def resolved_candidate_edges(
     ]
 
 
-def rebuild_resolved_candidate_edges(conn: sqlite3.Connection, source_base: str) -> None:
+def rebuild_resolved_candidate_edges(
+    conn: sqlite3.Connection, source_base: str
+) -> None:
     conn.execute(
         "DELETE FROM doc_entity_edges WHERE source_base = ? "
         "AND source_kind IN ('xref', 'text_inference')",

@@ -3,506 +3,33 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
-from pathlib import Path
-from typing import Any, Literal
-from urllib.parse import urlparse
+from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel, Field
 
-from readdocsserver.crawl import crawl_readthedocs, normalize_doc_root
-from readdocsserver.store import DocIndex, default_db_path
-
-INSTRUCTIONS = """
-Index Read the Docs / Sphinx HTML locally and query it with MCP search/fetch tools.
-
-Available MCP capabilities:
-- Tools for indexing, searching, fetching, listing indexed sources, listing pages per root, and scoped search (whole source or single page).
-- Symbol lookup for structured Sphinx/Python classes and methods when entity data is available.
-- Related symbol lookup for typed graph neighbors such as class methods, return types, parameter types, and base classes.
-- Prompts exposed as slash commands in compatible MCP clients for common workflows.
-- A status resource with the current database path and indexed source summary.
-
-Environment:
-- READTHEDOCS_MCP_DB: optional SQLite index path (default: ~/.cache/readdocs-mcp/index.sqlite).
-- READTHEDOCS_MCP_IMPERSONATE: optional curl_cffi browser TLS profile (default: chrome).
-- READTHEDOCS_MCP_TRANSPORT: stdio (default), sse, or streamable-http.
-- READTHEDOCS_MCP_HOST / READTHEDOCS_MCP_PORT: bind address for HTTP transports.
-""".strip()
-
-
-class IndexedSource(BaseModel):
-    """One indexed documentation root stored in SQLite."""
-
-    source_base: str
-    page_count: int
-    last_fetched_at: int | None
-
-
-class IndexStats(BaseModel):
-    """Crawler summary returned after indexing a docs site."""
-
-    source_base: str
-    fetched: int
-    skipped: int
-    sitemap_seeds: int = 0
-    errors: list[dict[str, str]] = Field(default_factory=list)
-    db_path: str
-
-
-class SearchResult(BaseModel):
-    """Search hit with one approximate matching line and its approximate line number."""
-
-    id: str
-    title: str
-    text: str
-    url: str
-    line: int | None = None
-    chunk_line_start: int | None = None
-    chunk_line_end: int | None = None
-
-
-class SearchResponse(BaseModel):
-    """Collection of search hits."""
-
-    results: list[SearchResult]
-
-
-class EntityParam(BaseModel):
-    """One documented parameter for a structured API entity."""
-
-    ord: int
-    name: str
-    type: str = ""
-    default: str = ""
-    description: str = ""
-
-
-class EntityNote(BaseModel):
-    """A note, warning, admonition, or version marker attached to an entity."""
-
-    ord: int
-    kind: str
-    version: str = ""
-    text: str
-
-
-class EntityResult(BaseModel):
-    """Search result for a structured documentation entity."""
-
-    entity_id: str
-    kind: str
-    name: str
-    qualname: str
-    signature: str
-    summary: str
-    page_url: str
-    anchor: str | None = None
-    line_start: int | None = None
-    line_end: int | None = None
-    parent_entity_id: str | None = None
-    related: dict[str, Any] | None = None
-
-
-class EntitySearchResponse(BaseModel):
-    """Collection of structured entity search hits."""
-
-    results: list[EntityResult]
-
-
-class EntityDetail(EntityResult):
-    """Full structured entity payload."""
-
-    source_base: str
-    body_text: str
-    params: list[EntityParam] = Field(default_factory=list)
-    notes: list[EntityNote] = Field(default_factory=list)
-    methods: list["EntityDetail"] = Field(default_factory=list)
-
-
-class EntityDetailResponse(BaseModel):
-    """One structured entity, or a not-found marker."""
-
-    entity: EntityDetail | None
-
-
-class EntityMethodListResponse(BaseModel):
-    """Methods belonging to one class entity."""
-
-    methods: list[EntityDetail]
-
-
-class SymbolLookupResult(BaseModel):
-    """One best structured symbol lookup result with page location context."""
-
-    found: bool
-    symbol_name: str
-    page_url: str | None = None
-    anchor: str | None = None
-    url_with_anchor: str | None = None
-    kind: str | None = None
-    name: str | None = None
-    qualname: str | None = None
-    line_start: int | None = None
-    line_end: int | None = None
-    context_start: int | None = None
-    context_end: int | None = None
-    context: str = ""
-    summary: str = ""
-    entity_id: str | None = None
-    related: dict[str, Any] | None = None
-
-
-class LookupSymbolResponse(BaseModel):
-    """Symbol lookup response."""
-
-    result: SymbolLookupResult
-
-
-class RelatedSymbolRef(BaseModel):
-    """Compact entity reference used in symbol graph responses."""
-
-    entity_id: str
-    qualname: str
-    kind: str
-    page_url: str
-    anchor: str | None = None
-
-
-class RelatedSymbolEdge(BaseModel):
-    """One typed edge adjacent to a symbol."""
-
-    direction: Literal["out", "in"]
-    edge_type: str
-    source_kind: str
-    param_name: str = ""
-    confidence: float
-    snippet: str = ""
-    source_page_url: str = ""
-    line_start: int | None = None
-    line_end: int | None = None
-    relation_label: str = ""
-    target: RelatedSymbolRef
-
-
-class RelatedSymbolsResponse(BaseModel):
-    """Typed symbol graph neighbors for one entity."""
-
-    found: bool
-    symbol: RelatedSymbolRef | None = None
-    edges: list[RelatedSymbolEdge] = Field(default_factory=list)
-
-
-class SymbolGraphStatsResponse(BaseModel):
-    """Diagnostic statistics for the stored symbol graph."""
-
-    source_base: str
-    edge_type_counts: dict[str, int] = Field(default_factory=dict)
-    source_kind_counts: dict[str, int] = Field(default_factory=dict)
-    unresolved_xref_target_count: int
-    top_unresolved_targets: list[dict[str, Any]] = Field(default_factory=list)
-    stale_edge_count: int
-    total_entities: int
-    total_pages: int
-
-
-class FetchMetadata(BaseModel):
-    """Source metadata attached to a fetched page."""
-
-    source_base: str
-    fetched_at: int
-
-
-class FetchResponse(BaseModel):
-    """Indexed page payload (full body or a 1-based inclusive line range)."""
-
-    id: str
-    title: str
-    text: str
-    url: str
-    metadata: FetchMetadata | None
-    total_lines: int | None = None
-    slice_start: int | None = None
-    slice_end: int | None = None
-
-
-class SourceListResponse(BaseModel):
-    """Indexed source overview."""
-
-    sources: list[IndexedSource]
-    db_path: str
-    default_db_hint: str
-
-
-class PageSection(BaseModel):
-    """One section in a page-level table of contents."""
-
-    id: str
-    title: str
-    summary: str = ""
-    level: int
-    url: str
-    children: list["PageSection"] = Field(default_factory=list)
-
-
-class ListedPage(BaseModel):
-    """One indexed documentation page with a lightweight section overview."""
-
-    url: str
-    title: str
-    source_base: str
-    toc: list[PageSection] = Field(default_factory=list)
-
-
-class ListPagesResponse(BaseModel):
-    """Paginated list of indexed pages."""
-
-    pages: list[ListedPage]
-    total: int
-    limit: int
-    offset: int
-    db_path: str
-
-
-def _index() -> DocIndex:
-    path = os.environ.get("READTHEDOCS_MCP_DB")
-    return DocIndex(Path(path) if path else None)
-
-
-def _mcp_bind_host() -> str:
-    return os.environ.get("READTHEDOCS_MCP_HOST", "127.0.0.1")
-
-
-def _mcp_bind_port() -> int:
-    return int(os.environ.get("READTHEDOCS_MCP_PORT", "8000"))
-
-
-def _transport() -> Literal["stdio", "sse", "streamable-http"]:
-    raw = os.environ.get("READTHEDOCS_MCP_TRANSPORT", "stdio").strip().lower()
-    if raw in {"sse", "streamable-http"}:
-        return raw
-    return "stdio"
-
-
-def _validate_seed_url(seed_url: str) -> str:
-    normalized = seed_url.strip()
-    if not normalized:
-        raise ValueError("seed_url must not be empty")
-    parsed = urlparse(normalized)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("seed_url must be an absolute http(s) URL")
-    return normalized
-
-
-def _validate_max_pages(max_pages: int) -> int:
-    if not 1 <= max_pages <= 5000:
-        raise ValueError("max_pages must be between 1 and 5000")
-    return max_pages
-
-
-def _validate_delay(request_delay_sec: float) -> float:
-    if not 0 <= request_delay_sec <= 30:
-        raise ValueError("request_delay_sec must be between 0 and 30")
-    return request_delay_sec
-
-
-def _validate_limit(limit: int) -> int:
-    if not 1 <= limit <= 100:
-        raise ValueError("limit must be between 1 and 100")
-    return limit
-
-
-def _optional_entity_kind(kind: str | None) -> str | None:
-    if kind is None:
-        return None
-    k = kind.strip().lower()
-    if not k:
-        return None
-    if k not in {"class", "method"}:
-        raise ValueError("kind must be 'class', 'method', or omitted")
-    return k
-
-
-def _validate_symbol_name(symbol_name: str) -> str:
-    s = symbol_name.strip()
-    if not s:
-        raise ValueError("symbol_name must not be empty")
-    return s
-
-
-def _validate_list_pages_limit(limit: int) -> int:
-    if not 1 <= limit <= 500:
-        raise ValueError("limit must be between 1 and 500")
-    return limit
-
-
-_VALID_EDGE_TYPES = {
-    "has_method",
-    "inherits_from",
-    "returns",
-    "accepts_parameter_type",
-    "references",
-    "see_also",
-    "mentioned_in_note",
-    "mentioned_in_warning",
-    "only_valid_in",
-    "requires",
-    "use_instead",
-    "similar_to",
-    "converts_to",
-}
-
-
-def _optional_edge_types(edge_types: list[str] | None) -> list[str] | None:
-    if edge_types is None:
-        return None
-    cleaned: list[str] = []
-    for edge_type in edge_types:
-        value = edge_type.strip()
-        if not value:
-            continue
-        if value not in _VALID_EDGE_TYPES:
-            raise ValueError(f"Unsupported edge_type: {value}")
-        if value not in cleaned:
-            cleaned.append(value)
-    return cleaned or None
-
-
-def _validate_offset(offset: int) -> int:
-    if offset < 0:
-        raise ValueError("offset must be >= 0")
-    if offset > 1_000_000:
-        raise ValueError("offset is too large")
-    return offset
-
-
-def _optional_source_base(source_base: str | None) -> str | None:
-    if source_base is None:
-        return None
-    s = source_base.strip()
-    if not s:
-        return None
-    # Match crawler-stored roots (see crawl_readthedocs: always normalize_doc_root(seed)).
-    # Also accepts a concrete page URL and narrows it to the docs directory prefix.
-    return normalize_doc_root(s)
-
-
-def _optional_url_contains(url_contains: str | None) -> str | None:
-    if url_contains is None:
-        return None
-    s = url_contains.strip()
-    return s or None
-
-
-def _validate_page_url(page_url: str) -> str:
-    u = page_url.strip()
-    if not u:
-        raise ValueError("page_url must not be empty")
-    parsed = urlparse(u)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("page_url must be an absolute http(s) URL")
-    return u
-
-
-_MAX_FETCH_LINES = 5000
-
-
-def _validate_line_slice(start: int | None, end: int | None) -> tuple[int, int] | None:
-    if start is None and end is None:
-        return None
-    if start is None or end is None:
-        raise ValueError(
-            "Provide both start and end (1-based inclusive line numbers), or omit both for the full page."
-        )
-    if start < 1 or end < start:
-        raise ValueError("start must be >= 1 and end must be >= start.")
-    if end - start + 1 > _MAX_FETCH_LINES:
-        raise ValueError(f"At most {_MAX_FETCH_LINES} lines per fetch.")
-    return (start, end)
-
-
-def _slice_body_lines(body: str, start: int, end: int) -> tuple[str, int, int, int]:
-    """Return (slice_text, total_lines, slice_start_used, slice_end_used)."""
-    lines = body.splitlines()
-    n = len(lines)
-    if n == 0:
-        return "", 0, start, end
-    if start > n:
-        return "", n, start, min(end, n)
-    s = max(1, start)
-    e = min(max(s, end), n)
-    return "\n".join(lines[s - 1 : e]), n, s, e
-
-
-def _entity_result_from_hit(hit) -> EntityResult:
-    return EntityResult(
-        entity_id=hit.entity_id,
-        kind=hit.kind,
-        name=hit.name,
-        qualname=hit.qualname,
-        signature=hit.signature,
-        summary=hit.summary,
-        page_url=hit.page_url,
-        anchor=hit.anchor,
-        line_start=hit.line_start,
-        line_end=hit.line_end,
-        parent_entity_id=hit.parent_entity_id,
-    )
-
-
-def _entity_result_from_hit_with_related(
-    idx: DocIndex, hit, source_base: str | None
-) -> EntityResult:
-    result = _entity_result_from_hit(hit)
-    if source_base:
-        related = idx.related_symbols(
-            source_base,
-            hit.qualname,
-            direction="both",
-            limit=30,
-        )
-        if related.get("found"):
-            result.related = {
-                "out": [
-                    edge
-                    for edge in related.get("edges", [])
-                    if edge.get("direction") == "out"
-                ],
-                "in": [
-                    edge
-                    for edge in related.get("edges", [])
-                    if edge.get("direction") == "in"
-                ],
-            }
-    return result
-
-
-def _entity_detail_from_dict(data: dict) -> EntityDetail:
-    methods = [
-        _entity_detail_from_dict(method)
-        for method in data.get("methods", [])
-        if isinstance(method, dict)
-    ]
-    return EntityDetail(
-        entity_id=str(data["entity_id"]),
-        source_base=str(data["source_base"]),
-        page_url=str(data["page_url"]),
-        anchor=data.get("anchor"),
-        kind=str(data["kind"]),
-        name=str(data["name"]),
-        qualname=str(data["qualname"]),
-        signature=str(data["signature"]),
-        summary=str(data["summary"]),
-        body_text=str(data["body_text"]),
-        line_start=data.get("line_start"),
-        line_end=data.get("line_end"),
-        parent_entity_id=data.get("parent_entity_id"),
-        params=[EntityParam.model_validate(p) for p in data.get("params", [])],
-        notes=[EntityNote.model_validate(n) for n in data.get("notes", [])],
-        methods=methods,
-    )
+from readdocsserver.mcp_instructions import INSTRUCTIONS
+from readdocsserver.schemas.mcp import (
+    EntityDetailResponse,
+    EntityMethodListResponse,
+    EntitySearchResponse,
+    FetchResponse,
+    IndexStats,
+    ListPagesResponse,
+    LookupSymbolResponse,
+    RelatedSymbolsResponse,
+    SearchResponse,
+    SourceListResponse,
+    SymbolGraphStatsResponse,
+)
+from readdocsserver.services import entities, indexing, pages, sources, symbols
+from readdocsserver.services import fetch as fetch_service
+from readdocsserver.services.search import (
+    search_docs,
+    search_in_file as search_in_file_page,
+)
+from readdocsserver.utils.env import get_mcp_transport, mcp_bind_host, mcp_bind_port
+from readdocsserver.utils.validators import validate_seed_url
 
 
 def create_server() -> FastMCP:
@@ -510,8 +37,8 @@ def create_server() -> FastMCP:
     mcp = FastMCP(
         name="readthedocs-docs",
         instructions=INSTRUCTIONS,
-        host=_mcp_bind_host(),
-        port=_mcp_bind_port(),
+        host=mcp_bind_host(),
+        port=mcp_bind_port(),
     )
 
     @mcp.tool()
@@ -522,34 +49,12 @@ def create_server() -> FastMCP:
         replace_source: bool = True,
     ) -> IndexStats:
         """Download and index HTML pages under a Read the Docs / Sphinx doc tree."""
-        validated_seed_url = _validate_seed_url(seed_url)
-        validated_max_pages = _validate_max_pages(max_pages)
-        validated_delay = _validate_delay(request_delay_sec)
-
-        idx = _index()
-        root = normalize_doc_root(validated_seed_url)
-        if replace_source:
-            idx.clear_source(root)
-
-        async def on_page(
-            url: str,
-            title: str,
-            body: str,
-            source_base: str,
-            fetched_at: int,
-            entities: list[dict],
-            toc: list[dict],
-        ) -> None:
-            idx.upsert_page(url, title, body, source_base, fetched_at, entities, toc)
-
-        stats = await crawl_readthedocs(
-            validated_seed_url,
-            max_pages=validated_max_pages,
-            request_delay_sec=validated_delay,
-            on_page=on_page,
+        return await indexing.run_index_readthedocs(
+            seed_url,
+            max_pages=max_pages,
+            request_delay_sec=request_delay_sec,
+            replace_source=replace_source,
         )
-        idx.rebuild_graph_for_source(root)
-        return IndexStats.model_validate({**stats, "db_path": str(idx.db_path)})
 
     @mcp.tool()
     async def search(
@@ -558,29 +63,7 @@ def create_server() -> FastMCP:
         source_base: str | None = None,
     ) -> SearchResponse:
         """Search indexed docs (at most one hit per page). Optional source_base limits results to one indexed docs root."""
-        stripped_query = query.strip()
-        if not stripped_query:
-            raise ValueError("query must not be empty")
-
-        idx = _index()
-        hits = idx.search(
-            stripped_query,
-            limit=_validate_limit(limit),
-            source_base=_optional_source_base(source_base),
-        )
-        results = [
-            SearchResult(
-                id=hit.url,
-                title=hit.title,
-                text=hit.snippet,
-                url=hit.url,
-                line=hit.line,
-                chunk_line_start=hit.chunk_line_start,
-                chunk_line_end=hit.chunk_line_end,
-            )
-            for hit in hits
-        ]
-        return SearchResponse(results=results)
+        return await search_docs(query, limit=limit, source_base=source_base)
 
     @mcp.tool()
     async def search_entities(
@@ -591,26 +74,12 @@ def create_server() -> FastMCP:
         include_related: bool = False,
     ) -> EntitySearchResponse:
         """Search structured docs entities such as Sphinx classes and methods."""
-        stripped_query = query.strip()
-        if not stripped_query:
-            raise ValueError("query must not be empty")
-        idx = _index()
-        scoped_source = _optional_source_base(source_base)
-        hits = idx.search_entities(
-            stripped_query,
-            limit=_validate_limit(limit),
-            kind=_optional_entity_kind(kind),
-            source_base=scoped_source,
-        )
-        if include_related:
-            results = [
-                _entity_result_from_hit_with_related(idx, hit, scoped_source)
-                for hit in hits
-            ]
-        else:
-            results = [_entity_result_from_hit(hit) for hit in hits]
-        return EntitySearchResponse(
-            results=results
+        return await entities.search_entities(
+            query,
+            kind=kind,
+            source_base=source_base,
+            limit=limit,
+            include_related=include_related,
         )
 
     @mcp.tool()
@@ -620,13 +89,9 @@ def create_server() -> FastMCP:
         include_related: bool = False,
     ) -> LookupSymbolResponse:
         """Find one structured Sphinx/Python symbol and return page, anchor, lines, and short context."""
-        idx = _index()
-        result = idx.lookup_symbol(
-            _optional_source_base(source_base) or "",
-            _validate_symbol_name(symbol_name),
-            include_related=include_related,
+        return await symbols.lookup_symbol(
+            source_base, symbol_name, include_related=include_related
         )
-        return LookupSymbolResponse(result=SymbolLookupResult.model_validate(result))
 
     @mcp.tool()
     async def related_symbols(
@@ -637,22 +102,18 @@ def create_server() -> FastMCP:
         limit: int = 50,
     ) -> RelatedSymbolsResponse:
         """Return typed symbol graph neighbors such as methods, return types, parameter types, and bases."""
-        idx = _index()
-        result = idx.related_symbols(
-            _optional_source_base(source_base) or "",
-            _validate_symbol_name(symbol_name),
-            edge_types=_optional_edge_types(edge_types),
+        return await symbols.related_symbols(
+            source_base,
+            symbol_name,
+            edge_types=edge_types,
             direction=direction,
-            limit=_validate_limit(limit),
+            limit=limit,
         )
-        return RelatedSymbolsResponse.model_validate(result)
 
     @mcp.tool()
     async def get_symbol_graph_stats(source_base: str) -> SymbolGraphStatsResponse:
         """Return diagnostic counts for symbol graph edges and unresolved links."""
-        idx = _index()
-        result = idx.symbol_graph_stats(_optional_source_base(source_base) or "")
-        return SymbolGraphStatsResponse.model_validate(result)
+        return await symbols.get_symbol_graph_stats(source_base)
 
     @mcp.tool()
     async def get_entity(
@@ -662,18 +123,11 @@ def create_server() -> FastMCP:
         include_notes: bool = True,
     ) -> EntityDetailResponse:
         """Fetch one structured entity by entity_id from search_entities."""
-        eid = entity_id.strip()
-        if not eid:
-            raise ValueError("entity_id must not be empty")
-        idx = _index()
-        entity = idx.get_entity(
-            eid,
+        return await entities.get_entity(
+            entity_id,
             include_methods=include_methods,
             include_params=include_params,
             include_notes=include_notes,
-        )
-        return EntityDetailResponse(
-            entity=_entity_detail_from_dict(entity) if entity else None
         )
 
     @mcp.tool()
@@ -683,18 +137,10 @@ def create_server() -> FastMCP:
         source_base: str | None = None,
     ) -> EntityMethodListResponse:
         """List methods for a class by class entity_id or class name."""
-        cleaned_name = class_name.strip() if class_name else None
-        cleaned_id = class_entity_id.strip() if class_entity_id else None
-        if not cleaned_name and not cleaned_id:
-            raise ValueError("Provide class_name or class_entity_id.")
-        idx = _index()
-        methods = idx.list_class_methods(
-            class_entity_id=cleaned_id,
-            class_name=cleaned_name,
-            source_base=_optional_source_base(source_base),
-        )
-        return EntityMethodListResponse(
-            methods=[_entity_detail_from_dict(method) for method in methods]
+        return await entities.list_class_methods(
+            class_name=class_name,
+            class_entity_id=class_entity_id,
+            source_base=source_base,
         )
 
     @mcp.tool()
@@ -705,18 +151,11 @@ def create_server() -> FastMCP:
         source_base: str | None = None,
     ) -> EntityDetailResponse:
         """Search one entity and return its structured params and notes context."""
-        stripped_query = query.strip()
-        if not stripped_query:
-            raise ValueError("query must not be empty")
-        idx = _index()
-        entity = idx.get_entity_context(
-            stripped_query,
-            kind=_optional_entity_kind(kind),
+        return await entities.get_entity_context(
+            query,
+            kind=kind,
             include_notes=include_notes,
-            source_base=_optional_source_base(source_base),
-        )
-        return EntityDetailResponse(
-            entity=_entity_detail_from_dict(entity) if entity else None
+            source_base=source_base,
         )
 
     @mcp.tool()
@@ -726,28 +165,7 @@ def create_server() -> FastMCP:
         limit: int = 15,
     ) -> SearchResponse:
         """Search inside one indexed page URL; may return several hits (different chunks) from the same file."""
-        stripped_query = query.strip()
-        if not stripped_query:
-            raise ValueError("query must not be empty")
-        validated_url = _validate_page_url(page_url)
-
-        idx = _index()
-        hits = idx.search_in_page(
-            validated_url, stripped_query, limit=_validate_limit(limit)
-        )
-        results = [
-            SearchResult(
-                id=hit.url,
-                title=hit.title,
-                text=hit.snippet,
-                url=hit.url,
-                line=hit.line,
-                chunk_line_start=hit.chunk_line_start,
-                chunk_line_end=hit.chunk_line_end,
-            )
-            for hit in hits
-        ]
-        return SearchResponse(results=results)
+        return await search_in_file_page(page_url, query, limit=limit)
 
     @mcp.tool()
     async def list_documentation_pages(
@@ -757,21 +175,11 @@ def create_server() -> FastMCP:
         offset: int = 0,
     ) -> ListPagesResponse:
         """List indexed page URLs, titles, and section TOCs; filter by documentation root and/or URL substring."""
-        lim = _validate_list_pages_limit(limit)
-        off = _validate_offset(offset)
-        idx = _index()
-        pages, total = idx.list_pages(
-            source_base=_optional_source_base(source_base),
-            url_contains=_optional_url_contains(url_contains),
-            limit=lim,
-            offset=off,
-        )
-        return ListPagesResponse(
-            pages=[ListedPage.model_validate(p) for p in pages],
-            total=total,
-            limit=lim,
-            offset=off,
-            db_path=str(idx.db_path),
+        return await pages.list_documentation_pages(
+            source_base=source_base,
+            url_contains=url_contains,
+            limit=limit,
+            offset=offset,
         )
 
     @mcp.tool()
@@ -781,61 +189,12 @@ def create_server() -> FastMCP:
         end: int | None = None,
     ) -> FetchResponse:
         """Load one indexed page by id (URL from `search`). Optional start/end: 1-based inclusive line numbers."""
-        page_id = id.strip()
-        if not page_id:
-            raise ValueError("id must not be empty")
-        span = _validate_line_slice(start, end)
-
-        idx = _index()
-        doc = idx.get_page(page_id)
-        if doc is None:
-            return FetchResponse(
-                id=page_id,
-                title="Not found",
-                text="No indexed page for this id. Run index_readthedocs first or check the URL.",
-                url=page_id,
-                metadata=None,
-                total_lines=None,
-                slice_start=None,
-                slice_end=None,
-            )
-
-        metadata = doc.get("metadata")
-        body = str(doc["text"])
-        total_lines = len(body.splitlines())
-        if span is None:
-            return FetchResponse(
-                id=str(doc["id"]),
-                title=str(doc["title"]),
-                text=body,
-                url=str(doc["url"]),
-                metadata=FetchMetadata.model_validate(metadata) if metadata else None,
-                total_lines=total_lines,
-                slice_start=None,
-                slice_end=None,
-            )
-        s, e = span
-        slice_text, n_lines, s_use, e_use = _slice_body_lines(body, s, e)
-        return FetchResponse(
-            id=str(doc["id"]),
-            title=str(doc["title"]),
-            text=slice_text,
-            url=str(doc["url"]),
-            metadata=FetchMetadata.model_validate(metadata) if metadata else None,
-            total_lines=n_lines,
-            slice_start=s_use,
-            slice_end=e_use,
-        )
+        return await fetch_service.fetch_page(id, start=start, end=end)
 
     @mcp.tool()
     async def list_indexed_sources() -> SourceListResponse:
         """List documentation roots currently stored and page counts."""
-        idx = _index()
-        return SourceListResponse(
-            sources=[IndexedSource.model_validate(item) for item in idx.list_sources()],
-            db_path=str(idx.db_path),
-            default_db_hint=str(default_db_path()),
-        )
+        return await sources.list_indexed_sources()
 
     @mcp.resource(
         "readdocs://status",
@@ -855,7 +214,7 @@ def create_server() -> FastMCP:
     )
     def index_docs_prompt(seed_url: str) -> str:
         """Create a prompt that asks the assistant to index a documentation site."""
-        validated_seed_url = _validate_seed_url(seed_url)
+        validated_seed_url = validate_seed_url(seed_url)
         return (
             "Index this documentation site with the `index_readthedocs` tool.\n"
             f"seed_url: {validated_seed_url}\n"
@@ -908,7 +267,7 @@ mcp = create_server()
 
 def main() -> None:
     """Run the MCP server with the configured transport."""
-    mcp.run(transport=_transport())
+    mcp.run(transport=get_mcp_transport())
 
 
 if __name__ == "__main__":
