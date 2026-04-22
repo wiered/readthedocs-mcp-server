@@ -10,6 +10,7 @@ from urllib.parse import urldefrag, urljoin
 from bs4 import NavigableString, Tag
 
 from readdocsserver.crawl.render import (
+    _RenderCache,
     _inline_text,
     _is_field_list,
     _is_py_object,
@@ -53,6 +54,7 @@ def _py_object_kind(dl: Tag) -> str | None:
 def _extract_py_entities(root: Tag, page_url: str) -> list[dict]:
     entities: list[dict] = []
     dd_cache: dict[int, _AnalyzedDd] = {}
+    render_cache: _RenderCache = {}
 
     def walk(
         node: Tag,
@@ -77,7 +79,12 @@ def _extract_py_entities(root: Tag, page_url: str) -> list[dict]:
                 continue
             if _is_py_object(child):
                 entity = _entity_from_py_object(
-                    child, parent_local_id, len(entities), page_url, dd_cache
+                    child,
+                    parent_local_id,
+                    len(entities),
+                    page_url,
+                    dd_cache,
+                    render_cache,
                 )
                 current_parent = parent_local_id
                 if entity is not None:
@@ -105,6 +112,7 @@ def _entity_from_py_object(
     ordinal: int,
     page_url: str,
     dd_cache: dict[int, _AnalyzedDd],
+    render_cache: _RenderCache,
 ) -> dict | None:
     kind = _py_object_kind(dl)
     if kind is None:
@@ -120,7 +128,9 @@ def _entity_from_py_object(
     dds = [
         child for child in dl.find_all("dd", recursive=False) if isinstance(child, Tag)
     ]
-    dd_analyses = [_analyze_entity_dd(dd, page_url, dd_cache) for dd in dds]
+    dd_analyses = [
+        _analyze_entity_dd(dd, page_url, dd_cache, render_cache) for dd in dds
+    ]
     body_text = "\n\n".join(
         analysis.body_text for analysis in dd_analyses if analysis.body_text
     )
@@ -416,7 +426,7 @@ def _has_structural_note_ancestor(node: Tag, boundary: Tag) -> bool:
     return False
 
 
-def _render_entity_body(dd: Tag) -> str:
+def _render_entity_body(dd: Tag, render_cache: _RenderCache) -> str:
     blocks: list[str] = []
     for child in dd.children:
         if isinstance(child, NavigableString):
@@ -427,23 +437,30 @@ def _render_entity_body(dd: Tag) -> str:
         if not isinstance(child, Tag) or _is_py_object(child):
             continue
         if _is_field_list(child):
-            rendered = _render_field_list(child)
+            rendered = _render_field_list(
+                child, cache=render_cache, include_py_objects=False
+            )
             if rendered:
                 blocks.append(rendered)
             continue
-        blocks.extend(_render_blocks(child))
+        blocks.extend(
+            _render_blocks(child, cache=render_cache, include_py_objects=False)
+        )
     return "\n\n".join(block for block in blocks if block.strip())
 
 
 def _analyze_entity_dd(
-    dd: Tag, page_url: str, cache: dict[int, _AnalyzedDd]
+    dd: Tag,
+    page_url: str,
+    cache: dict[int, _AnalyzedDd],
+    render_cache: _RenderCache,
 ) -> _AnalyzedDd:
     cache_key = id(dd)
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
 
-    body_text = _render_entity_body(dd)
+    body_text = _render_entity_body(dd, render_cache)
     summary = _summary_from_dd(dd) or _summary_from_body(body_text)
     params: list[dict] = []
     notes: list[dict] = []

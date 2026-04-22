@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
+_RenderCache = dict[tuple[int, bool], tuple[str, ...]]
+
 
 def _find_main_content(soup: BeautifulSoup) -> Tag:
     for sel in (
@@ -61,11 +63,40 @@ def _is_py_object(tag: Tag) -> bool:
 
 
 def _render_text_blocks(root: Tag) -> str:
-    blocks = _render_blocks(root)
+    cache: _RenderCache = {}
+    blocks = _render_blocks(root, cache=cache, include_py_objects=True)
     return "\n\n".join(block for block in blocks if block.strip())
 
 
-def _render_blocks(node: Tag) -> list[str]:
+def _has_py_object_descendant(tag: Tag) -> bool:
+    return (
+        tag.find(lambda child: isinstance(child, Tag) and _is_py_object(child))
+        is not None
+    )
+
+
+def _render_blocks(
+    node: Tag,
+    *,
+    cache: _RenderCache | None = None,
+    include_py_objects: bool = True,
+) -> list[str]:
+    cache_key = (id(node), include_py_objects)
+    if cache is not None:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return list(cached)
+
+    if _is_py_object(node):
+        if not include_py_objects:
+            if cache is not None:
+                cache[cache_key] = ()
+            return []
+        blocks = _render_py_object(node, cache=cache)
+        if cache is not None:
+            cache[cache_key] = tuple(blocks)
+        return blocks
+
     blocks: list[str] = []
     childrens = list(node.children)
 
@@ -78,36 +109,69 @@ def _render_blocks(node: Tag) -> list[str]:
         if not isinstance(child, Tag):
             continue
         if _is_py_object(child):
-            blocks.extend(_render_py_object(child))
+            if include_py_objects:
+                blocks.extend(_render_py_object(child, cache=cache))
             continue
         if _is_field_list(child):
-            rendered = _render_field_list(child)
+            rendered = _render_field_list(
+                child, cache=cache, include_py_objects=include_py_objects
+            )
             if rendered:
                 blocks.append(rendered)
             continue
         if child.name in {"section", "article", "main", "div", "dd", "body"}:
-            blocks.extend(_render_blocks(child))
+            blocks.extend(
+                _render_blocks(
+                    child, cache=cache, include_py_objects=include_py_objects
+                )
+            )
             continue
         if child.name in {"h1", "h2", "h3", "h4", "h5", "h6", "p"}:
+            if not include_py_objects and _has_py_object_descendant(child):
+                blocks.extend(
+                    _render_blocks(
+                        child, cache=cache, include_py_objects=include_py_objects
+                    )
+                )
+                continue
             text = _inline_text(child)
             if text:
                 blocks.append(text)
             continue
         if child.name in {"ul", "ol"}:
-            blocks.extend(_render_list(child))
+            blocks.extend(
+                _render_list(
+                    child, cache=cache, include_py_objects=include_py_objects
+                )
+            )
             continue
         if child.name == "pre":
             text = child.get_text("\n", strip=False).strip()
             if text:
                 blocks.append(text)
             continue
+        if not include_py_objects and _has_py_object_descendant(child):
+            blocks.extend(
+                _render_blocks(
+                    child, cache=cache, include_py_objects=include_py_objects
+                )
+            )
+            continue
         text = _inline_text(child)
         if text:
             blocks.append(text)
+    if cache is not None:
+        cache[cache_key] = tuple(blocks)
     return blocks
 
 
-def _render_py_object(dl: Tag) -> list[str]:
+def _render_py_object(dl: Tag, *, cache: _RenderCache | None = None) -> list[str]:
+    cache_key = (id(dl), True)
+    if cache is not None:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return list(cached)
+
     blocks: list[str] = []
     sig = dl.find("dt", recursive=False)
     if sig and isinstance(sig, Tag):
@@ -117,17 +181,33 @@ def _render_py_object(dl: Tag) -> list[str]:
     for child in dl.find_all(recursive=False):
         if child.name != "dd":
             continue
-        blocks.extend(_render_blocks(child))
+        blocks.extend(_render_blocks(child, cache=cache, include_py_objects=True))
+    if cache is not None:
+        cache[cache_key] = tuple(blocks)
     return blocks
 
 
-def _render_list(list_tag: Tag) -> list[str]:
+def _render_list(
+    list_tag: Tag,
+    *,
+    cache: _RenderCache | None = None,
+    include_py_objects: bool = True,
+) -> list[str]:
     blocks: list[str] = []
     for li in list_tag.find_all("li", recursive=False):
         nested = [child for child in li.children if isinstance(child, Tag)]
         paras = [child for child in nested if child.name == "p"]
         if paras:
             for p in paras:
+                if not include_py_objects and _has_py_object_descendant(p):
+                    blocks.extend(
+                        _render_blocks(
+                            p,
+                            cache=cache,
+                            include_py_objects=include_py_objects,
+                        )
+                    )
+                    continue
                 text = _inline_text(p)
                 if text:
                     blocks.append(text)
@@ -135,15 +215,41 @@ def _render_list(list_tag: Tag) -> list[str]:
                 if child.name == "p":
                     continue
                 if child.name in {"ul", "ol"}:
-                    blocks.extend(_render_list(child))
+                    blocks.extend(
+                        _render_list(
+                            child,
+                            cache=cache,
+                            include_py_objects=include_py_objects,
+                        )
+                    )
+                elif not include_py_objects and _has_py_object_descendant(child):
+                    blocks.extend(
+                        _render_blocks(
+                            child,
+                            cache=cache,
+                            include_py_objects=include_py_objects,
+                        )
+                    )
         else:
+            if not include_py_objects and _has_py_object_descendant(li):
+                blocks.extend(
+                    _render_blocks(
+                        li, cache=cache, include_py_objects=include_py_objects
+                    )
+                )
+                continue
             text = _inline_text(li)
             if text:
                 blocks.append(text)
     return blocks
 
 
-def _render_field_list(dl: Tag) -> str:
+def _render_field_list(
+    dl: Tag,
+    *,
+    cache: _RenderCache | None = None,
+    include_py_objects: bool = True,
+) -> str:
     lines: list[str] = []
     children = [child for child in dl.children if isinstance(child, Tag)]
     i = 0
@@ -162,8 +268,12 @@ def _render_field_list(dl: Tag) -> str:
                 lines.append(f"{label}:")
                 lines.extend(items)
             continue
-        value_blocks = _render_blocks(dd)
-        if not value_blocks:
+        value_blocks = _render_blocks(
+            dd, cache=cache, include_py_objects=include_py_objects
+        )
+        if not value_blocks and (
+            include_py_objects or not _has_py_object_descendant(dd)
+        ):
             value = _inline_text(dd)
             if value:
                 value_blocks = [value]

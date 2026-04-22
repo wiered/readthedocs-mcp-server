@@ -15,7 +15,7 @@ from readdocsserver.crawl import (
     same_site_links,
     under_prefix,
 )
-from readdocsserver.crawl.render import _find_main_content
+from readdocsserver.crawl.render import _find_main_content, _render_blocks
 from readdocsserver.crawl.runner import _decompose_soup
 
 
@@ -460,6 +460,98 @@ def test_extract_structured_entities_handles_many_nested_methods_without_leaks()
         ["value_1"],
         ["value_2"],
     ]
+
+
+def test_extract_structured_entities_excludes_wrapped_methods_from_class_body() -> None:
+    html = b"""<!doctype html><html><body><article role="main">
+      <dl class="py class">
+        <dt class="sig sig-object py" id="pkg.Container">
+          <span class="sig-name descname"><span class="pre">Container</span></span>
+        </dt>
+        <dd>
+          <p>Container summary.</p>
+          <dl class="field-list simple">
+            <dt>Parameters<span class="colon">:</span></dt>
+            <dd><ul class="simple">
+              <li><p><strong>name</strong> (<code>str</code>) - Container name.</p></li>
+            </ul></dd>
+            <dt>See also<span class="colon">:</span></dt>
+            <dd><p><a href="#pkg.Other">Other</a></p></dd>
+          </dl>
+          <div class="admonition note"><p>Class note.</p></div>
+          <div class="methods">
+            <dl class="py method">
+              <dt class="sig sig-object py" id="pkg.Container.do">
+                <span class="sig-name descname"><span class="pre">do</span></span>
+              </dt>
+              <dd>
+                <p>Do method summary with <a href="#pkg.Worker">Worker</a>.</p>
+                <dl class="field-list simple">
+                  <dt>Parameters<span class="colon">:</span></dt>
+                  <dd><ul class="simple">
+                    <li><p><strong>item</strong> (<code>str</code>) - Method item.</p></li>
+                  </ul></dd>
+                </dl>
+                <div class="admonition warning"><p>Method warning.</p></div>
+              </dd>
+            </dl>
+          </div>
+        </dd>
+      </dl>
+    </article></body></html>"""
+
+    _, text, main = _extract_text(html, "https://docs.example/api.html")
+    cls, method = extract_structured_entities(
+        main, "https://docs.example/api.html", text
+    )
+
+    assert "Container summary." in cls["body_text"]
+    assert "Parameters:\nname(str) – Container name." in cls["body_text"]
+    assert "Class note." in cls["body_text"]
+    assert "do" not in cls["body_text"]
+    assert "Do method summary" not in cls["body_text"]
+    assert "Method item." not in cls["body_text"]
+    assert "Method warning." not in cls["body_text"]
+    assert [param["name"] for param in cls["params"]] == ["name"]
+    assert {note["kind"] for note in cls["notes"]} == {"note"}
+    assert {xref["target_anchor"] for xref in cls["xrefs"]} == {"pkg.Other"}
+
+    assert method["parent_local_id"] == cls["local_id"]
+    assert "Do method summary" in method["body_text"]
+    assert "Parameters:\nitem(str) – Method item." in method["body_text"]
+    assert [param["name"] for param in method["params"]] == ["item"]
+    assert {note["kind"] for note in method["notes"]} == {"warning"}
+    assert {xref["target_anchor"] for xref in method["xrefs"]} == {"pkg.Worker"}
+
+
+def test_render_blocks_cache_keeps_py_object_modes_separate() -> None:
+    soup = BeautifulSoup(
+        b"""<div>
+          <p>Container summary.</p>
+          <div class="methods">
+            <dl class="py method">
+              <dt class="sig sig-object py" id="pkg.Container.do">
+                <span class="sig-name descname"><span class="pre">do</span></span>
+              </dt>
+              <dd><p>Do method summary.</p></dd>
+            </dl>
+          </div>
+        </div>""",
+        "html.parser",
+    )
+    wrapper = soup.div
+    assert wrapper is not None
+    cache: dict[tuple[int, bool], tuple[str, ...]] = {}
+
+    without_py = _render_blocks(wrapper, cache=cache, include_py_objects=False)
+    without_py_again = _render_blocks(wrapper, cache=cache, include_py_objects=False)
+    with_py = _render_blocks(wrapper, cache=cache, include_py_objects=True)
+
+    assert without_py == without_py_again == ["Container summary."]
+    assert "Do method summary." not in without_py
+    assert "Do method summary." in with_py
+    assert (id(wrapper), False) in cache
+    assert (id(wrapper), True) in cache
 
 
 def test_same_site_links_filters_prefix() -> None:

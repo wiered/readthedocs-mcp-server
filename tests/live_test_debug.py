@@ -38,6 +38,27 @@ from readdocsserver.services.deps import get_doc_index  # noqa: E402
 
 
 DEFAULT_SEED_URL = "https://docs.readthedocs.com/platform/stable/index.html"
+DEFAULT_SEED_URL = "https://discordpy.readthedocs.io/en/stable/index.html"
+
+
+def get_doc_name_from_url(url: str) -> str:
+    """
+    Extracts the doc name from a URL like 'https://docs.readthedocs.com/platform/stable/index.html'
+    and returns 'docs.readthedocs.com'.
+
+    Examples:
+        get_doc_name_from_url("https://docs.readthedocs.com/platform/stable/index.html")
+        -> "docs.readthedocs.com"
+    """
+    import re
+
+    m = re.match(r"^(?:\w+://)?([^/]+)", url)
+    if m:
+        return m.group(1)
+    return ""
+
+
+DOC_NAME = get_doc_name_from_url(DEFAULT_SEED_URL)
 DEFAULT_DB_PATH = Path(tempfile.gettempdir()) / "readdocs-mcp-live-debug.sqlite"
 
 
@@ -81,7 +102,16 @@ async def _run_index_via_tool(args: argparse.Namespace) -> dict[str, Any]:
     m = create_server()
     from viztracer import VizTracer
 
-    tracer = VizTracer(output_file="call_tool_trace.json")
+    from datetime import datetime
+
+    timestr = datetime.now().strftime("%Y%m%d_%H%M%S")
+    doc_name = (
+        get_doc_name_from_url(args.seed_url) if hasattr(args, "seed_url") else "unknown"
+    )
+    trace_dir = Path(__file__).parent.parent / "traces"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    trace_filename = str(trace_dir / f"call_tool_trace_{doc_name}_{timestr}.json")
+    tracer = VizTracer(output_file=trace_filename)
     tracer.start()
     try:
         result = await m.call_tool(

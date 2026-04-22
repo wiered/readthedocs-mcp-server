@@ -213,3 +213,8 @@ dev_docs/
 
 # trace files
 *_trace.json
+traces/
+
+# result files
+result.txt
+result_*.txt
