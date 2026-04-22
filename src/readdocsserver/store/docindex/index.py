@@ -886,7 +886,7 @@ class DocIndex:
                 total = int(total_row["n"]) if total_row else 0
                 rows = conn.execute(
                     f"""
-                    SELECT url, title, source_base, toc_json
+                    SELECT url, title, source_base
                     FROM pages
                     {where_sql}
                     ORDER BY url
@@ -899,7 +899,6 @@ class DocIndex:
                         "url": r["url"],
                         "title": r["title"],
                         "source_base": r["source_base"],
-                        "toc": _json_list(str(r["toc_json"] or "[]")),
                     }
                     for r in rows
                 ], total

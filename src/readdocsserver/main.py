@@ -174,7 +174,7 @@ def create_server() -> FastMCP:
         limit: int = 200,
         offset: int = 0,
     ) -> ListPagesResponse:
-        """List indexed page URLs, titles, and section TOCs; filter by documentation root and/or URL substring."""
+        """List indexed page URLs and titles; filter by documentation root and/or URL substring."""
         return await pages.list_documentation_pages(
             source_base=source_base,
             url_contains=url_contains,

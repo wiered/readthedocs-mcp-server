@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from pathlib import Path
 
 from readdocsserver.store import (
@@ -13,6 +15,16 @@ from readdocsserver.store import (
     _fts_match_stages,
     _fts_match_queries,
 )
+
+
+def _page_toc_from_db(idx: DocIndex, url: str) -> list:
+    conn = sqlite3.connect(idx.db_path)
+    try:
+        row = conn.execute("SELECT toc_json FROM pages WHERE url = ?", (url,)).fetchone()
+        assert row is not None
+        return json.loads(row[0] or "[]")
+    finally:
+        conn.close()
 
 
 def test_fts_match_queries_empty() -> None:
@@ -132,11 +144,13 @@ def test_doc_index_page_toc_roundtrip_and_replace(tmp_path: Path) -> None:
     pages, total = idx.list_pages(source_base="https://docs.example/")
 
     assert total == 1
-    assert pages[0]["toc"] == toc
+    assert pages[0]["url"] == url
+    assert _page_toc_from_db(idx, url) == toc
 
     idx.upsert_page(url, "Page", "body v2", "https://docs.example/", 2, toc=[])
     pages_after_replace, _ = idx.list_pages(source_base="https://docs.example/")
-    assert pages_after_replace[0]["toc"] == []
+    assert pages_after_replace[0]["url"] == url
+    assert _page_toc_from_db(idx, url) == []
 
 
 def test_doc_index_page_toc_defaults_to_empty(tmp_path: Path) -> None:
@@ -147,7 +161,8 @@ def test_doc_index_page_toc_defaults_to_empty(tmp_path: Path) -> None:
 
     pages, _ = idx.list_pages(source_base="https://docs.example/")
 
-    assert pages[0]["toc"] == []
+    assert pages[0]["url"] == "https://docs.example/page.html"
+    assert _page_toc_from_db(idx, "https://docs.example/page.html") == []
 
 
 def test_doc_index_structured_entities_roundtrip(tmp_path: Path) -> None:

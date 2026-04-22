@@ -210,24 +210,12 @@ class SourceListResponse(BaseModel):
     default_db_hint: str
 
 
-class PageSection(BaseModel):
-    """One section in a page-level table of contents."""
-
-    id: str
-    title: str
-    summary: str = ""
-    level: int
-    url: str
-    children: list[PageSection] = Field(default_factory=list)
-
-
 class ListedPage(BaseModel):
-    """One indexed documentation page with a lightweight section overview."""
+    """One indexed documentation page (URL inventory for list_documentation_pages)."""
 
     url: str
     title: str
     source_base: str
-    toc: list[PageSection] = Field(default_factory=list)
 
 
 class ListPagesResponse(BaseModel):
@@ -241,4 +229,3 @@ class ListPagesResponse(BaseModel):
 
 
 EntityDetail.model_rebuild()
-PageSection.model_rebuild()

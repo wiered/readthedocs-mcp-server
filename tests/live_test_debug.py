@@ -38,7 +38,7 @@ from readdocsserver.services.deps import get_doc_index  # noqa: E402
 
 
 DEFAULT_SEED_URL = "https://docs.readthedocs.com/platform/stable/index.html"
-DEFAULT_SEED_URL = "https://discordpy.readthedocs.io/en/stable/api.html"
+DEFAULT_SEED_URL = "https://discordpy.readthedocs.io/en/stable/index.html"
 
 
 def get_doc_name_from_url(url: str) -> str:
