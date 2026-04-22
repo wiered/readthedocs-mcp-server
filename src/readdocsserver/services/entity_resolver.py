@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from dataclasses import dataclass
 
+from readdocsserver.schemas.domain import SymbolInfo, SymbolMaps
 
 _NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 _IGNORED_TYPE_NAMES = {
@@ -37,20 +37,6 @@ _IGNORED_TYPE_NAMES = {
     "typing.Union",
     "Sequence",
 }
-
-
-@dataclass(frozen=True)
-class SymbolInfo:
-    entity_id: str
-    name: str
-    qualname: str
-
-
-@dataclass(frozen=True)
-class SymbolMaps:
-    by_qualname: dict[str, str]
-    by_unique_name: dict[str, str]
-    symbols: dict[str, SymbolInfo]
 
 
 def build_symbol_maps(conn: sqlite3.Connection, source_base: str) -> SymbolMaps:

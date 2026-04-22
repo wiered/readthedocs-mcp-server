@@ -6,12 +6,12 @@ import re
 import sqlite3
 from typing import Any
 
-from .entity_resolver import (
+from readdocsserver.schemas.domain import EntityEdge, EntityXrefCandidate
+from readdocsserver.services.entity_resolver import (
     build_symbol_maps,
     resolve_symbol_name,
     resolve_type_names,
 )
-from .types import EntityEdge, EntityXrefCandidate
 
 _RETURN_RE = re.compile(r"(?:->|→)\s*(.+)$")
 _CLASS_BASE_RE = re.compile(

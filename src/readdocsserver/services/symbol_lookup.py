@@ -5,7 +5,10 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from .constants import _LOOKUP_CONTEXT_AFTER, _LOOKUP_CONTEXT_BEFORE
+from readdocsserver.services.constants import (
+    _LOOKUP_CONTEXT_AFTER,
+    _LOOKUP_CONTEXT_BEFORE,
+)
 
 
 def _empty_symbol_lookup(symbol_name: str) -> dict[str, Any]:

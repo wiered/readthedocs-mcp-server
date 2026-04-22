@@ -3,19 +3,19 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from readdocsserver.schemas.domain import EntityEdge
+from readdocsserver.services.entity_edges import build_edges_for_page
+from readdocsserver.services.entity_resolver import (
+    build_symbol_maps,
+    resolve_symbol_name,
+    resolve_type_names,
+)
 from readdocsserver.store import DocIndex
 from readdocsserver.store.docindex.operations import (
     entity_edges,
     entity_edges_between,
     replace_edges,
 )
-from readdocsserver.store.entity_edges import build_edges_for_page
-from readdocsserver.store.entity_resolver import (
-    build_symbol_maps,
-    resolve_symbol_name,
-    resolve_type_names,
-)
-from readdocsserver.store.types import EntityEdge
 
 
 SOURCE_BASE = "https://docs.example/"

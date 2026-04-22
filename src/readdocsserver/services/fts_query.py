@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from .constants import (
+from readdocsserver.services.constants import (
     _AUTO_FREE_TOKEN_THRESHOLD,
     _LOW_SIGNAL_QUERY_TERMS,
     _MAX_FALLBACK_TERMS,

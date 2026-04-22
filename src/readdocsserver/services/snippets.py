@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import re
 
-from .constants import _CONTEXT_LINE_MAX
-from .fts_query import _collect_query_pieces
+from readdocsserver.services.constants import _CONTEXT_LINE_MAX
+from readdocsserver.services.fts_query import _collect_query_pieces
 
 
 def _query_match_needles(query: str) -> list[str]:

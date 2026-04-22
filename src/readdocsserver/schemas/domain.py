@@ -1,4 +1,4 @@
-"""Dataclasses for chunk spans and search / entity hits."""
+"""Domain dataclasses for indexing, search hits, and symbol resolution."""
 
 from __future__ import annotations
 
@@ -69,3 +69,17 @@ class EntityXrefCandidate:
     confidence: float = 1.0
     line_start: int | None = None
     line_end: int | None = None
+
+
+@dataclass(frozen=True)
+class SymbolInfo:
+    entity_id: str
+    name: str
+    qualname: str
+
+
+@dataclass(frozen=True)
+class SymbolMaps:
+    by_qualname: dict[str, str]
+    by_unique_name: dict[str, str]
+    symbols: dict[str, SymbolInfo]

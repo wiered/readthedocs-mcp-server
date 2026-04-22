@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-from .constants import _CHUNK_MAX, _CHUNK_MIN_MERGE, _CHUNK_OVERLAP
-from .types import ChunkSpan
+from readdocsserver.schemas.domain import ChunkSpan
+from readdocsserver.services.constants import (
+    _CHUNK_MAX,
+    _CHUNK_MIN_MERGE,
+    _CHUNK_OVERLAP,
+)
 
 
 def _hard_split(text: str, max_chars: int, overlap: int) -> list[str]:

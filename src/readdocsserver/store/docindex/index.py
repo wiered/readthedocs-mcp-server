@@ -8,12 +8,18 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from ..fts_query import _fts_match_stages
-from ..jsonutil import _json_list
+from readdocsserver.schemas.domain import EntityHit, EntityXrefCandidate, SearchHit
+from readdocsserver.services.entity_edges import (
+    build_edges_for_page,
+    build_text_inference_candidates,
+)
+from readdocsserver.services.fts_query import _fts_match_stages
+from readdocsserver.services.symbol_lookup import (
+    _empty_symbol_lookup,
+    _symbol_lookup_from_row,
+)
 from ..paths import default_db_path
-from ..symbol_lookup import _empty_symbol_lookup, _symbol_lookup_from_row
-from ..types import EntityHit, EntityXrefCandidate, SearchHit
-from ..entity_edges import build_edges_for_page, build_text_inference_candidates
+from readdocsserver.utils.jsonutil import _json_list
 from .operations import (
     child_methods,
     entity_edges,

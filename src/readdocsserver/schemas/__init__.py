@@ -1,5 +1,14 @@
 """API / MCP response schemas."""
 
+from readdocsserver.schemas.domain import (
+    ChunkSpan,
+    EntityEdge,
+    EntityHit,
+    EntityXrefCandidate,
+    SearchHit,
+    SymbolInfo,
+    SymbolMaps,
+)
 from readdocsserver.schemas.mcp import (
     EntityDetail,
     EntityDetailResponse,
@@ -27,6 +36,13 @@ from readdocsserver.schemas.mcp import (
 )
 
 __all__ = [
+    "ChunkSpan",
+    "EntityEdge",
+    "EntityHit",
+    "EntityXrefCandidate",
+    "SearchHit",
+    "SymbolInfo",
+    "SymbolMaps",
     "EntityDetail",
     "EntityDetailResponse",
     "EntityMethodListResponse",

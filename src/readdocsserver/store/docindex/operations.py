@@ -5,10 +5,18 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from ..chunking import _body_to_chunks_with_lines
-from ..entity_fts import _entity_fts_body_text
-from ..snippets import _approx_line_in_body, _context_line_info_from_chunk
-from ..types import EntityEdge, EntityHit, EntityXrefCandidate, SearchHit
+from readdocsserver.schemas.domain import (
+    EntityEdge,
+    EntityHit,
+    EntityXrefCandidate,
+    SearchHit,
+)
+from readdocsserver.services.chunking import _body_to_chunks_with_lines
+from readdocsserver.services.entity_fts import _entity_fts_body_text
+from readdocsserver.services.snippets import (
+    _approx_line_in_body,
+    _context_line_info_from_chunk,
+)
 
 
 def replace_chunks(conn: sqlite3.Connection, url: str, title: str, body: str) -> None:
