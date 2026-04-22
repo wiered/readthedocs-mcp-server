@@ -316,6 +316,47 @@ def test_extract_structured_entities_xref_candidates() -> None:
     }
 
 
+def test_extract_structured_entities_xref_context_from_single_traversal() -> None:
+    html = b"""<!doctype html><html><body><article role="main">
+      <dl class="py class">
+        <dt class="sig sig-object py" id="pkg.Contexts">
+          <span class="sig-name descname"><span class="pre">Contexts</span></span>
+        </dt>
+        <dd>
+          <dl class="field-list simple">
+            <dt>See also<span class="colon">:</span></dt>
+            <dd><div><section><p>
+              Deep <span><a href="#pkg.DeepSeeAlso">DeepSeeAlso</a></span>
+            </p></section></div></dd>
+          </dl>
+          <div class="admonition warning">
+            <p>See also <span><a href="#pkg.WarningSeeAlso">WarningSeeAlso</a></span>.</p>
+          </div>
+          <div class="admonition note">
+            <div class="admonition warning">
+              <p>Avoid <a href="#pkg.WarningInsideNote">WarningInsideNote</a>.</p>
+            </div>
+          </div>
+          <div class="admonition seealso">
+            <p class="admonition-title">See also</p>
+            <p>Related <a href="#pkg.SphinxSeeAlso">SphinxSeeAlso</a>.</p>
+          </div>
+        </dd>
+      </dl>
+    </article></body></html>"""
+
+    _, text, main = _extract_text(html, "https://docs.example/api.html")
+    entities = extract_structured_entities(main, "https://docs.example/api.html", text)
+    edge_types = {
+        xref["target_anchor"]: xref["edge_type"] for xref in entities[0]["xrefs"]
+    }
+
+    assert edge_types["pkg.DeepSeeAlso"] == "see_also"
+    assert edge_types["pkg.WarningSeeAlso"] == "see_also"
+    assert edge_types["pkg.WarningInsideNote"] == "mentioned_in_warning"
+    assert edge_types["pkg.SphinxSeeAlso"] == "see_also"
+
+
 def test_extract_structured_entities_isolates_nested_method_metadata() -> None:
     html = b"""<!doctype html><html><body><article role="main">
       <dl class="py class">
@@ -415,7 +456,9 @@ def test_extract_structured_entities_keeps_direct_class_metadata_separate() -> N
     assert {xref["target_anchor"] for xref in method["xrefs"]} == {"pkg.Worker"}
 
 
-def test_extract_structured_entities_handles_many_nested_methods_without_leaks() -> None:
+def test_extract_structured_entities_handles_many_nested_methods_without_leaks() -> (
+    None
+):
     methods = "\n".join(
         f"""
         <dl class="py method">
@@ -455,7 +498,9 @@ def test_extract_structured_entities_handles_many_nested_methods_without_leaks()
     assert len(entities) == 4
     assert cls["params"] == []
     assert all(method["parent_local_id"] == cls["local_id"] for method in methods_out)
-    assert [[param["name"] for param in method["params"]] for method in methods_out] == [
+    assert [
+        [param["name"] for param in method["params"]] for method in methods_out
+    ] == [
         ["value_0"],
         ["value_1"],
         ["value_2"],

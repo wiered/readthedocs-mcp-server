@@ -42,6 +42,12 @@ class _AnalyzedDd:
     xrefs: list[dict]
 
 
+@dataclass(slots=True)
+class _EntityContentTag:
+    tag: Tag
+    xref_edge_type: str
+
+
 def _py_object_kind(dl: Tag) -> str | None:
     classes = set(dl.get("class", []))
     if "class" in classes:
@@ -302,14 +308,18 @@ def _note_from_node(node: Tag, boundary: Tag, ord_: int) -> dict | None:
                 kind = "versionremoved"
             else:
                 kind = "deprecated"
-            version = (m.group("version") or m.group("deprecated_version") or "").strip()
+            version = (
+                m.group("version") or m.group("deprecated_version") or ""
+            ).strip()
             text = (m.group("text") or m.group("deprecated_text") or "").strip() or text
     if not kind or not text:
         return None
     if (kind.startswith("version") or kind == "deprecated") and not version:
         m = _VERSION_RE.match(text)
         if m:
-            version = (m.group("version") or m.group("deprecated_version") or "").strip()
+            version = (
+                m.group("version") or m.group("deprecated_version") or ""
+            ).strip()
             text = (m.group("text") or m.group("deprecated_text") or "").strip() or text
     return {
         "ord": ord_,
@@ -322,20 +332,22 @@ def _note_from_node(node: Tag, boundary: Tag, ord_: int) -> dict | None:
 def _extract_xrefs_from_container(container: Tag, page_url: str) -> list[dict]:
     xrefs: list[dict] = []
     for link in container.find_all("a", href=True):
-        xref = _xref_from_link(link, page_url)
+        xref = _xref_from_link(link, page_url, edge_type="references")
         if xref is not None:
             xrefs.append(xref)
     return xrefs
 
 
-def _xref_from_link(link: Tag, page_url: str) -> dict | None:
+def _xref_from_link(
+    link: Tag, page_url: str, edge_type: str = "references"
+) -> dict | None:
     if "headerlink" in link.get("class", []):
         return None
     target_url, target_anchor = _xref_target(str(link["href"]), page_url)
     if not target_anchor:
         return None
     return {
-        "edge_type": _xref_edge_type(link),
+        "edge_type": edge_type,
         "source_kind": "xref",
         "target_url": target_url,
         "target_anchor": target_anchor,
@@ -359,35 +371,51 @@ def _xref_snippet(link: Tag) -> str:
     return text[:300]
 
 
-def _xref_edge_type(link: Tag) -> str:
-    parent = link.parent
-    in_note = False
-    in_warning = False
-    while isinstance(parent, Tag):
-        classes = set(parent.get("class", []))
-        if "warning" in classes:
-            in_warning = True
-        if classes & {"note", "admonition", "versionadded", "versionchanged"}:
-            in_note = True
-        if _is_see_also_context(parent):
-            return "see_also"
-        parent = parent.parent
-    if in_warning:
-        return "mentioned_in_warning"
-    if in_note:
-        return "mentioned_in_note"
-    return "references"
+def _is_see_also_label(tag: Tag) -> bool:
+    return _inline_text(tag, compact=True).rstrip(":").lower() == "see also"
 
 
-def _is_see_also_context(tag: Tag) -> bool:
-    text = _inline_text(tag)
-    if text.lower().startswith("see also"):
-        return True
-    previous = tag.find_previous_sibling()
-    if isinstance(previous, Tag):
-        label = _inline_text(previous).rstrip(":").lower()
-        return label == "see also"
+def _starts_with_see_also_label(tag: Tag) -> bool:
+    text = ""
+    limit = len("see also:") + 1
+    for value in tag.strings:
+        text = _normalize_inline_text(f"{text} {value}" if text else str(value))
+        if len(text) >= limit:
+            break
+    label = text[:limit].lower().lstrip()
+    return label.startswith("see also")
+
+
+def _has_see_also_title(tag: Tag) -> bool:
+    for child in tag.children:
+        if not isinstance(child, Tag):
+            continue
+        if "admonition-title" in child.get("class", []):
+            return _is_see_also_label(child)
     return False
+
+
+def _is_see_also_node(tag: Tag, follows_see_also_dt: bool) -> bool:
+    classes = set(tag.get("class", []))
+    return (
+        follows_see_also_dt
+        or "seealso" in classes
+        or (tag.name == "p" and _starts_with_see_also_label(tag))
+        or ("admonition" in classes and _has_see_also_title(tag))
+    )
+
+
+def _xref_edge_type_for_tag(
+    tag: Tag, inherited_edge_type: str, follows_see_also_dt: bool
+) -> str:
+    if inherited_edge_type == "see_also" or _is_see_also_node(tag, follows_see_also_dt):
+        return "see_also"
+    classes = set(tag.get("class", []))
+    if "warning" in classes:
+        return "mentioned_in_warning"
+    if classes & {"note", "admonition", "versionadded", "versionchanged"}:
+        return "mentioned_in_note"
+    return inherited_edge_type
 
 
 def _dedupe_xrefs(xrefs: list[dict]) -> list[dict]:
@@ -466,7 +494,8 @@ def _analyze_entity_dd(
     notes: list[dict] = []
     xrefs: list[dict] = []
 
-    for node in _iter_entity_content_tags(dd):
+    for item in _iter_entity_content_tags(dd):
+        node = item.tag
         if _is_field_list(node):
             params.extend(_params_from_field_list(node))
         if node.name in {"div", "p"}:
@@ -474,7 +503,7 @@ def _analyze_entity_dd(
             if note is not None:
                 notes.append(note)
         if node.name == "a" and node.has_attr("href"):
-            xref = _xref_from_link(node, page_url)
+            xref = _xref_from_link(node, page_url, edge_type=item.xref_edge_type)
             if xref is not None:
                 xrefs.append(xref)
 
@@ -489,16 +518,29 @@ def _analyze_entity_dd(
     return analyzed
 
 
-def _iter_entity_content_tags(dd: Tag) -> Iterator[Tag]:
-    children = [child for child in dd.children if isinstance(child, Tag)]
-    stack = list(reversed(children))
+def _iter_entity_content_tags(dd: Tag) -> Iterator[_EntityContentTag]:
+    stack = list(reversed(_child_content_tags(dd, "references")))
     while stack:
-        node = stack.pop()
+        item = stack.pop()
+        node = item.tag
         if _is_py_object(node):
             continue
-        yield node
-        child_tags = [child for child in node.children if isinstance(child, Tag)]
-        stack.extend(reversed(child_tags))
+        yield item
+        stack.extend(reversed(_child_content_tags(node, item.xref_edge_type)))
+
+
+def _child_content_tags(parent: Tag, edge_type: str) -> list[_EntityContentTag]:
+    items: list[_EntityContentTag] = []
+    follows_see_also_dt = False
+    for child in parent.children:
+        if not isinstance(child, Tag):
+            continue
+        child_edge_type = _xref_edge_type_for_tag(
+            child, edge_type, follows_see_also_dt and child.name == "dd"
+        )
+        items.append(_EntityContentTag(tag=child, xref_edge_type=child_edge_type))
+        follows_see_also_dt = child.name == "dt" and _is_see_also_label(child)
+    return items
 
 
 def _summary_from_dd(dd: Tag) -> str:
