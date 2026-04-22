@@ -112,6 +112,26 @@ def replace_edges(
         )
 
 
+# Shared JOIN for resolving xref / text_inference candidates to doc_entities.
+_XREF_RESOLVE_JOIN = """
+        FROM doc_entity_xref_candidates AS c
+        JOIN doc_entities AS e
+          ON e.source_base = c.source_base
+         AND (
+             (c.target_url = '' AND c.target_anchor != ''
+                 AND e.anchor = c.target_anchor)
+             OR (c.target_url != '' AND c.target_anchor != ''
+                 AND e.page_url = c.target_url AND e.anchor = c.target_anchor)
+             OR (c.target_name != '' AND e.qualname = c.target_name)
+             OR (c.target_name != '' AND e.name = c.target_name
+                 AND 1 = (
+                     SELECT COUNT(*) FROM doc_entities AS u
+                     WHERE u.source_base = c.source_base AND u.name = c.target_name
+                 ))
+         )
+"""
+
+
 def replace_xref_candidates(
     conn: sqlite3.Connection,
     url: str,
@@ -161,21 +181,7 @@ def resolved_candidate_edges(
         SELECT c.source_base, c.from_entity_id, e.entity_id AS to_entity_id,
                c.edge_type, c.source_kind, c.snippet, c.page_url, c.confidence,
                c.line_start, c.line_end
-        FROM doc_entity_xref_candidates AS c
-        JOIN doc_entities AS e
-          ON e.source_base = c.source_base
-         AND (
-             (c.target_url = '' AND c.target_anchor != ''
-                 AND e.anchor = c.target_anchor)
-             OR (c.target_url != '' AND c.target_anchor != ''
-                 AND e.page_url = c.target_url AND e.anchor = c.target_anchor)
-             OR (c.target_name != '' AND e.qualname = c.target_name)
-             OR (c.target_name != '' AND e.name = c.target_name
-                 AND 1 = (
-                     SELECT COUNT(*) FROM doc_entities AS u
-                     WHERE u.source_base = c.source_base AND u.name = c.target_name
-                 ))
-         )
+        {_XREF_RESOLVE_JOIN}
         WHERE c.source_base = ?{page_filter}
         ORDER BY c.page_url, c.from_entity_id, c.edge_type, e.entity_id
         """,
@@ -207,30 +213,20 @@ def rebuild_resolved_candidate_edges(
         "AND source_kind IN ('xref', 'text_inference')",
         (source_base,),
     )
-    edges = resolved_candidate_edges(conn, source_base)
-    for edge in edges:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO doc_entity_edges(
-                source_base, from_entity_id, to_entity_id, edge_type, source_kind,
-                param_name, confidence, snippet, page_url, line_start, line_end
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                source_base,
-                edge.from_entity_id,
-                edge.to_entity_id,
-                edge.edge_type,
-                edge.source_kind,
-                edge.param_name,
-                edge.confidence,
-                edge.snippet,
-                edge.page_url,
-                edge.line_start,
-                edge.line_end,
-            ),
+    conn.execute(
+        f"""
+        INSERT OR IGNORE INTO doc_entity_edges(
+            source_base, from_entity_id, to_entity_id, edge_type, source_kind,
+            param_name, confidence, snippet, page_url, line_start, line_end
         )
+        SELECT c.source_base, c.from_entity_id, e.entity_id,
+               c.edge_type, c.source_kind, '', c.confidence, c.snippet, c.page_url,
+               c.line_start, c.line_end
+        {_XREF_RESOLVE_JOIN}
+        WHERE c.source_base = ?
+        """,
+        (source_base,),
+    )
 
 
 def entity_edges(

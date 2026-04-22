@@ -8,6 +8,109 @@ import sqlite3
 from readdocsserver.schemas.domain import SymbolInfo, SymbolMaps
 
 _NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+
+
+class SymbolMapsRuntime:
+    """
+    Incremental qualname/name maps for edge building while indexing.
+
+    ``build_symbol_maps`` reloads every entity for a source on each page; that is
+    O(pages * entities) and stalls large doc crawls. This structure is updated per
+    page in O(entities on page).
+    """
+
+    __slots__ = (
+        "by_qualname",
+        "symbols",
+        "_entity_qualname",
+        "_entity_name",
+        "_name_to_entities",
+    )
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.by_qualname: dict[str, str] = {}
+        self.symbols: dict[str, SymbolInfo] = {}
+        self._entity_qualname: dict[str, str] = {}
+        self._entity_name: dict[str, str] = {}
+        self._name_to_entities: dict[str, set[str]] = {}
+
+    def seed_from_db(self, conn: sqlite3.Connection, source_base: str) -> None:
+        self.reset()
+        rows = conn.execute(
+            """
+            SELECT entity_id, name, qualname
+            FROM doc_entities
+            WHERE source_base = ?
+            """,
+            (source_base,),
+        ).fetchall()
+        for row in rows:
+            self._add(
+                str(row["entity_id"]),
+                str(row["name"] or ""),
+                str(row["qualname"] or ""),
+            )
+
+    def remove_entities_for_page(
+        self, conn: sqlite3.Connection, source_base: str, page_url: str
+    ) -> None:
+        rows = conn.execute(
+            """
+            SELECT entity_id FROM doc_entities
+            WHERE source_base = ? AND page_url = ?
+            """,
+            (source_base, page_url),
+        ).fetchall()
+        for row in rows:
+            self._remove(str(row["entity_id"]))
+
+    def add_entity_rows(self, rows: list[tuple[str, str, str]]) -> None:
+        for entity_id, name, qualname in rows:
+            self._add(entity_id, name, qualname)
+
+    def to_symbol_maps(self) -> SymbolMaps:
+        by_unique_name: dict[str, str] = {}
+        for name, eids in self._name_to_entities.items():
+            if len(eids) == 1:
+                by_unique_name[name] = next(iter(eids))
+        return SymbolMaps(
+            by_qualname=dict(self.by_qualname),
+            by_unique_name=by_unique_name,
+            symbols=dict(self.symbols),
+        )
+
+    def _remove(self, entity_id: str) -> None:
+        qualname = self._entity_qualname.pop(entity_id, None)
+        if qualname is not None:
+            self.by_qualname.pop(qualname, None)
+            self.symbols.pop(qualname, None)
+        name = self._entity_name.pop(entity_id, None)
+        if not name:
+            return
+        bucket = self._name_to_entities.get(name)
+        if bucket is None:
+            return
+        bucket.discard(entity_id)
+        if not bucket:
+            del self._name_to_entities[name]
+
+    def _add(self, entity_id: str, name: str, qualname: str) -> None:
+        if not qualname:
+            return
+        self.by_qualname[qualname] = entity_id
+        self.symbols[qualname] = SymbolInfo(
+            entity_id=entity_id, name=name, qualname=qualname
+        )
+        self._entity_qualname[entity_id] = qualname
+        if not name:
+            return
+        self._entity_name[entity_id] = name
+        self._name_to_entities.setdefault(name, set()).add(entity_id)
+
+
 _IGNORED_TYPE_NAMES = {
     "Any",
     "None",

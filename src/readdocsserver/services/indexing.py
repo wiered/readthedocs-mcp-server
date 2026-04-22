@@ -38,11 +38,16 @@ async def run_index_readthedocs(
     ) -> None:
         idx.upsert_page(url, title, body, source_base, fetched_at, entities, toc)
 
-    stats = await crawl_readthedocs(
-        validated_seed_url,
-        max_pages=validated_max_pages,
-        request_delay_sec=validated_delay,
-        on_page=on_page,
-    )
-    idx.rebuild_graph_for_source(root)
-    return IndexStats.model_validate({**stats, "db_path": str(idx.db_path)})
+    try:
+        print(f"validated_seed_url: {validated_seed_url}")
+
+        stats = await crawl_readthedocs(
+            validated_seed_url,
+            max_pages=validated_max_pages,
+            request_delay_sec=validated_delay,
+            on_page=on_page,
+        )
+        idx.rebuild_graph_for_source(root)
+        return IndexStats.model_validate({**stats, "db_path": str(idx.db_path)})
+    finally:
+        idx.discard_symbol_maps_runtime(root)

@@ -209,4 +209,20 @@ def init_schema(conn: sqlite3.Connection) -> None:
         for row in conn.execute("SELECT url, title, body FROM pages").fetchall():
             replace_chunks(conn, row["url"], row["title"], row["body"])
     rebuild_doc_entities_fts(conn)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_doc_entities_src_qual "
+        "ON doc_entities(source_base, qualname)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_doc_entities_src_name "
+        "ON doc_entities(source_base, name)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_doc_entities_src_anchor "
+        "ON doc_entities(source_base, anchor)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_doc_entity_xref_src_page "
+        "ON doc_entity_xref_candidates(source_base, page_url)"
+    )
     conn.commit()

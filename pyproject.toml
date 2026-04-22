@@ -50,3 +50,6 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "live: network crawl against real documentation (enable with READTHEDOCS_MCP_RUN_LIVE=1)",
+]

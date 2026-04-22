@@ -8,11 +8,12 @@ import time
 from collections import deque
 from urllib.parse import urljoin, urlparse
 
+from bs4 import BeautifulSoup
 from curl_cffi.requests import AsyncSession
 
 from readdocsserver.crawl.entities import extract_structured_entities
 from readdocsserver.crawl.links import same_site_links
-from readdocsserver.crawl.render import extract_text_and_title
+from readdocsserver.crawl.render import extract_text_and_title, _find_main_content
 from readdocsserver.crawl.sitemap import discover_sitemap_seed_urls
 from readdocsserver.crawl.toc import extract_page_toc
 from readdocsserver.crawl.urls import (
@@ -21,6 +22,17 @@ from readdocsserver.crawl.urls import (
     normalize_page_url,
     under_prefix,
 )
+
+
+def _decompose_soup(html) -> BeautifulSoup:
+    """Decompose soup."""
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    for tag in soup.select("a.headerlink"):
+        tag.decompose()
+
+    return soup
 
 
 async def crawl_readthedocs(
@@ -74,7 +86,10 @@ async def crawl_readthedocs(
     # curl_cffi impersonates a real browser TLS stack; many RTD sites sit behind
     # Cloudflare and return 403 to generic Python HTTP clients (e.g. httpx/requests).
     async with AsyncSession(impersonate=tls_profile) as client:
-        sitemap_cap = min(max(max_pages * 8, 500), 20000)
+        # Keep sitemap URL list modest; URLs are queued after the first successful
+        # HTML fetch (and same-site links from that page) so TOC/sidebar wins over
+        # hundreds of alphabetically ordered sitemap entries.
+        sitemap_cap = min(max(max_pages * 8, 120), max(max_pages * 40, 400), 5000)
         sitemap_urls = await discover_sitemap_seed_urls(
             client,
             root,
@@ -85,10 +100,40 @@ async def crawl_readthedocs(
         stats["sitemap_seeds"] = len(sitemap_urls)
 
         try_enqueue(first)
-        for u in sitemap_urls:
-            try_enqueue(u)
+        sitemap_seeded = False
 
-        while queue and stats["fetched"] < max_pages:
+        def _enqueue_sitemap_batch() -> None:
+            nonlocal sitemap_seeded
+            if sitemap_seeded or not sitemap_urls:
+                return
+            for u in sitemap_urls:
+                try_enqueue(u)
+            sitemap_seeded = True
+
+        # Hard cap so a bad network / mostly-404 queue cannot spin for hours.
+        max_dequeues = min(
+            25000,
+            max(len(sitemap_urls) + 2000, max_pages * 600),
+        )
+        dequeues = 0
+
+        while stats["fetched"] < max_pages:
+            print(f"stats['fetched']: {stats['fetched']}")
+            if not queue:
+                _enqueue_sitemap_batch()
+                if not queue:
+                    break
+
+            dequeues += 1
+            if dequeues > max_dequeues:
+                stats["errors"].append(
+                    {
+                        "url": "",
+                        "error": "crawl stopped: dequeue limit exceeded (partial index)",
+                    }
+                )
+                break
+
             current = queue.popleft()
             cc = canonical_page_url(current)
             queued.discard(cc)
@@ -119,9 +164,15 @@ async def crawl_readthedocs(
             if not under_prefix(final_url, origin, path_prefix):
                 stats["skipped"] += 1
                 continue
-            title, body = extract_text_and_title(resp.content, str(resp.url))
-            entities = extract_structured_entities(resp.content, str(resp.url), body)
-            toc = extract_page_toc(resp.content, final_url)
+
+            decomposed_soup = _decompose_soup(resp.content)
+            main = _find_main_content(decomposed_soup)
+
+            title, body = extract_text_and_title(decomposed_soup, main, str(resp.url))
+            print(f"extracted title: {title}")
+            return
+            entities = extract_structured_entities(main, str(resp.url), body)
+            toc = extract_page_toc(main, final_url)
 
             stats["fetched"] += 1
             fetched_at = int(time.time())
@@ -132,5 +183,6 @@ async def crawl_readthedocs(
                 resp.content, str(resp.url), origin, path_prefix
             ):
                 try_enqueue(link)
+            _enqueue_sitemap_batch()
 
     return stats

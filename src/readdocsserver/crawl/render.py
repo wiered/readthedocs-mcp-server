@@ -17,6 +17,7 @@ def _find_main_content(soup: BeautifulSoup) -> Tag:
         "main",
         '[role="main"]',
     ):
+        print(f"sel: {sel}")
         main = soup.select_one(sel)
         if main:
             return main
@@ -66,7 +67,9 @@ def _render_text_blocks(root: Tag) -> str:
 
 def _render_blocks(node: Tag) -> list[str]:
     blocks: list[str] = []
-    for child in node.children:
+    childrens = list(node.children)
+
+    for child in childrens:
         if isinstance(child, NavigableString):
             text = _normalize_inline_text(str(child))
             if text:
@@ -181,17 +184,13 @@ def _render_field_list_items(dd: Tag) -> list[str]:
     return [text] if text else []
 
 
-def extract_text_and_title(html: bytes, page_url: str) -> tuple[str, str]:
-    soup = BeautifulSoup(html, "html.parser")
-    for tag in soup(["script", "style", "noscript"]):
-        tag.decompose()
-    for tag in soup.select("a.headerlink"):
-        tag.decompose()
-    title_el = soup.find("title")
+def extract_text_and_title(
+    decomposed_soup: BeautifulSoup, main: Tag, page_url: str
+) -> tuple[str, str]:
+    title_el = decomposed_soup.find("title")
     title = title_el.get_text(strip=True) if title_el else ""
-    main = _find_main_content(soup)
     text = _render_text_blocks(main)
     if not title:
-        h1 = soup.find("h1")
+        h1 = decomposed_soup.find("h1")
         title = h1.get_text(strip=True) if h1 else urlparse(page_url).path
     return title, text

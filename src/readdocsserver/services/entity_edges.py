@@ -6,7 +6,7 @@ import re
 import sqlite3
 from typing import Any
 
-from readdocsserver.schemas.domain import EntityEdge, EntityXrefCandidate
+from readdocsserver.schemas.domain import EntityEdge, EntityXrefCandidate, SymbolMaps
 from readdocsserver.services.entity_resolver import (
     build_symbol_maps,
     resolve_symbol_name,
@@ -50,9 +50,11 @@ def build_edges_for_page(
     conn: sqlite3.Connection,
     source_base: str,
     page_url: str,
+    *,
+    maps: SymbolMaps | None = None,
 ) -> list[EntityEdge]:
     """Build typed edges for entities stored on one page."""
-    maps = build_symbol_maps(conn, source_base)
+    maps = maps or build_symbol_maps(conn, source_base)
     entities = conn.execute(
         """
         SELECT entity_id, kind, qualname, signature, parent_entity_id,

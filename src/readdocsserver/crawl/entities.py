@@ -5,10 +5,9 @@ from __future__ import annotations
 import re
 from urllib.parse import urldefrag, urljoin
 
-from bs4 import BeautifulSoup, NavigableString, Tag
+from bs4 import NavigableString, Tag
 
 from readdocsserver.crawl.render import (
-    _find_main_content,
     _inline_text,
     _is_field_list,
     _is_py_object,
@@ -445,15 +444,9 @@ def _attach_body_lines(entities: list[dict], body: str) -> None:
 
 
 def extract_structured_entities(
-    html: bytes, page_url: str, body: str | None = None
+    main: Tag, page_url: str, body: str | None = None
 ) -> list[dict]:
     """Extract Sphinx Python-domain classes, methods, parameters, and notes."""
-    soup = BeautifulSoup(html, "html.parser")
-    for tag in soup(["script", "style", "noscript"]):
-        tag.decompose()
-    for tag in soup.select("a.headerlink"):
-        tag.decompose()
-    main = _find_main_content(soup)
     rendered_body = body if body is not None else _render_text_blocks(main)
     entities = _extract_py_entities(main, page_url)
     _attach_body_lines(entities, rendered_body)

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from bs4 import BeautifulSoup, Tag
+from bs4 import Tag
 
-from readdocsserver.crawl.render import _find_main_content, _inline_text
+from readdocsserver.crawl.render import _inline_text
 
 
 def _direct_section_children(root: Tag) -> list[Tag]:
@@ -67,14 +67,8 @@ def _section_to_toc_item(section: Tag, page_url: str, *, level: int) -> dict | N
     }
 
 
-def extract_page_toc(html: bytes, page_url: str) -> list[dict]:
+def extract_page_toc(main: Tag, page_url: str) -> list[dict]:
     """Extract a lightweight nested table of contents from Sphinx sections."""
-    soup = BeautifulSoup(html, "html.parser")
-    for tag in soup(["script", "style", "noscript"]):
-        tag.decompose()
-    for tag in soup.select("a.headerlink"):
-        tag.decompose()
-    main = _find_main_content(soup)
     toc: list[dict] = []
     for section in _direct_section_children(main):
         item = _section_to_toc_item(section, page_url, level=1)

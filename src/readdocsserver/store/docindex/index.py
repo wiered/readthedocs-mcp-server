@@ -14,6 +14,7 @@ from readdocsserver.services.entity_edges import (
     build_text_inference_candidates,
 )
 from readdocsserver.services.fts_query import _fts_match_stages
+from readdocsserver.services.entity_resolver import SymbolMapsRuntime
 from readdocsserver.services.symbol_lookup import (
     _empty_symbol_lookup,
     _symbol_lookup_from_row,
@@ -45,6 +46,7 @@ class DocIndex:
         self._path = Path(db_path) if db_path else default_db_path()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self._symbol_maps_runtime: dict[str, SymbolMapsRuntime] = {}
         self._init_schema()
 
     @property
@@ -107,6 +109,7 @@ class DocIndex:
                     "DELETE FROM pages WHERE source_base = ?", (source_base,)
                 )
                 deleted = cur.rowcount or 0
+                self._symbol_maps_runtime.pop(source_base, None)
                 conn.commit()
                 return deleted
             finally:
@@ -141,8 +144,17 @@ class DocIndex:
                     (url, title, body, source_base, fetched_at, toc_json),
                 )
                 replace_chunks(conn, url, title, body)
+                runtime = self._symbol_maps_runtime.get(source_base)
+                if runtime is None:
+                    runtime = SymbolMapsRuntime()
+                    runtime.seed_from_db(conn, source_base)
+                    self._symbol_maps_runtime[source_base] = runtime
+                runtime.remove_entities_for_page(conn, source_base, url)
                 local_to_entity = replace_entities(
                     conn, url, source_base, entities or []
+                )
+                runtime.add_entity_rows(
+                    self._page_entity_triplets(url, entities or [])
                 )
                 xref_candidates = self._xref_candidates_from_entities(
                     url, source_base, entities or [], local_to_entity
@@ -151,12 +163,35 @@ class DocIndex:
                     build_text_inference_candidates(conn, source_base, url)
                 )
                 replace_xref_candidates(conn, url, source_base, xref_candidates)
-                edges = build_edges_for_page(conn, source_base, url)
+                edges = build_edges_for_page(
+                    conn, source_base, url, maps=runtime.to_symbol_maps()
+                )
                 edges.extend(resolved_candidate_edges(conn, source_base, page_url=url))
                 replace_edges(conn, url, source_base, edges)
                 conn.commit()
             finally:
                 conn.close()
+
+    def discard_symbol_maps_runtime(self, source_base: str) -> None:
+        with self._lock:
+            self._symbol_maps_runtime.pop(source_base, None)
+
+    @staticmethod
+    def _page_entity_triplets(
+        url: str, entities: list[dict[str, Any]]
+    ) -> list[tuple[str, str, str]]:
+        rows: list[tuple[str, str, str]] = []
+        for i, entity in enumerate(entities):
+            anchor = str(entity.get("anchor") or "").strip()
+            entity_id = f"{url}#{anchor}" if anchor else f"{url}#entity-{i}"
+            rows.append(
+                (
+                    entity_id,
+                    str(entity.get("name") or ""),
+                    str(entity.get("qualname") or ""),
+                )
+            )
+        return rows
 
     def _xref_candidates_from_entities(
         self,
