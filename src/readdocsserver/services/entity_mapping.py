@@ -34,25 +34,7 @@ def entity_result_from_hit_with_related(
 ) -> EntityResult:
     result = entity_result_from_hit(hit)
     if source_base:
-        related = idx.related_symbols(
-            source_base,
-            hit.qualname,
-            direction="both",
-            limit=30,
-        )
-        if related.get("found"):
-            result.related = {
-                "out": [
-                    edge
-                    for edge in related.get("edges", [])
-                    if edge.get("direction") == "out"
-                ],
-                "in": [
-                    edge
-                    for edge in related.get("edges", [])
-                    if edge.get("direction") == "in"
-                ],
-            }
+        result.related = idx.compact_related(hit.entity_id, limit=30)
     return result
 
 

@@ -20,7 +20,6 @@ from readdocsserver.services.symbol_lookup import (
     _symbol_lookup_from_row,
 )
 from ..paths import default_db_path
-from readdocsserver.utils.jsonutil import _json_list
 from .operations import (
     child_methods,
     entity_edges,
@@ -153,9 +152,7 @@ class DocIndex:
                 local_to_entity = replace_entities(
                     conn, url, source_base, entities or []
                 )
-                runtime.add_entity_rows(
-                    self._page_entity_triplets(url, entities or [])
-                )
+                runtime.add_entity_rows(self._page_entity_triplets(url, entities or []))
                 xref_candidates = self._xref_candidates_from_entities(
                     url, source_base, entities or [], local_to_entity
                 )
@@ -445,7 +442,7 @@ class DocIndex:
                 if row is not None:
                     result = _symbol_lookup_from_row(row, row["page_body"])
                     if include_related:
-                        result["related"] = self._compact_related(
+                        result["related"] = self._compact_related_strings(
                             conn, str(row["entity_id"])
                         )
                     return result
@@ -475,10 +472,18 @@ class DocIndex:
                     return _empty_symbol_lookup(symbol)
                 result = _symbol_lookup_from_row(row, row["page_body"])
                 if include_related:
-                    result["related"] = self._compact_related(
+                    result["related"] = self._compact_related_strings(
                         conn, str(row["entity_id"])
                     )
                 return result
+            finally:
+                conn.close()
+
+    def compact_related(self, entity_id: str, limit: int = 30) -> dict[str, list[str]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                return self._compact_related_strings(conn, entity_id, limit=limit)
             finally:
                 conn.close()
 
@@ -750,45 +755,45 @@ class DocIndex:
                         return rows
         return rows
 
-    def _compact_related(
+    def _compact_related_strings(
         self, conn: sqlite3.Connection, entity_id: str, limit: int = 30
-    ) -> dict[str, list[dict[str, Any]]]:
+    ) -> dict[str, list[str]]:
+        limit = max(1, min(limit, 100))
         edges = self._related_edge_rows(
-            conn, entity_id, edge_types=None, direction="both", limit=limit
+            conn,
+            entity_id,
+            edge_types=None,
+            direction="both",
+            limit=min(limit * 4, 100),
         )
+        edges = [edge for edge in edges if edge.source_kind != "signature"]
         refs = self._entity_refs_by_id(
             conn,
             [
-                str(edge.to_entity_id)
-                if edge.direction == "out"
-                else str(edge.from_entity_id)
+                edge_id
                 for edge in edges
-            ],
+                for edge_id in (str(edge.from_entity_id), str(edge.to_entity_id))
+                if edge_id != entity_id
+            ]
+            + [entity_id],
         )
-        out: dict[str, list[dict[str, Any]]] = {"out": [], "in": []}
+        out: dict[str, list[str]] = {"out": [], "in": []}
+        added = 0
         for edge in _sort_related_edges(edges):
-            related_id = (
-                str(edge.to_entity_id)
-                if edge.direction == "out"
-                else str(edge.from_entity_id)
-            )
-            target = refs.get(related_id)
-            if target is None:
+            if added >= limit:
+                break
+            from_ref = refs.get(str(edge.from_entity_id))
+            to_ref = refs.get(str(edge.to_entity_id))
+            if from_ref is None or to_ref is None:
                 continue
             out[edge.direction].append(
-                {
-                    "edge_type": edge.edge_type,
-                    "relation_label": _relation_label(edge.edge_type, edge.direction),
-                    "source_kind": edge.source_kind,
-                    "confidence": edge.confidence,
-                    "param_name": edge.param_name,
-                    "snippet": edge.snippet,
-                    "source_page_url": edge.page_url,
-                    "line_start": edge.line_start,
-                    "line_end": edge.line_end,
-                    "target": target,
-                }
+                _compact_relation_string(
+                    str(from_ref["qualname"]),
+                    edge.edge_type,
+                    str(to_ref["qualname"]),
+                )
             )
+            added += 1
         return out
 
     def _entity_refs_by_id(
@@ -942,6 +947,12 @@ def _relation_label(edge_type: str, direction: str) -> str:
             "has_method": "method_of",
         }.get(edge_type, edge_type)
     return edge_type
+
+
+def _compact_relation_string(
+    source_qualname: str, relation_label: str, target_qualname: str
+) -> str:
+    return f"{source_qualname} {relation_label} {target_qualname}"
 
 
 def _sort_related_edges(edges: list[_DirectedEdge]) -> list[_DirectedEdge]:

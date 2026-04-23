@@ -15,12 +15,15 @@ from readdocsserver.store import (
     _fts_match_stages,
     _fts_match_queries,
 )
+from readdocsserver.services.entity_mapping import entity_result_from_hit_with_related
 
 
 def _page_toc_from_db(idx: DocIndex, url: str) -> list:
     conn = sqlite3.connect(idx.db_path)
     try:
-        row = conn.execute("SELECT toc_json FROM pages WHERE url = ?", (url,)).fetchone()
+        row = conn.execute(
+            "SELECT toc_json FROM pages WHERE url = ?", (url,)
+        ).fetchone()
         assert row is not None
         return json.loads(row[0] or "[]")
     finally:
@@ -252,23 +255,19 @@ def test_doc_index_structured_entities_roundtrip(tmp_path: Path) -> None:
     assert entity["notes"][0]["kind"] == "versionadded"
     assert [m["name"] for m in entity["methods"]] == ["edit_message"]
 
-    version_hits = idx.search_entities(
-        "versionadded 1.2 Initial", kind="class", limit=5
-    )
-    assert len(version_hits) == 1
-    assert version_hits[0].name == "LayoutView"
+    summary_hits = idx.search_entities("Edit message", kind="method", limit=5)
+    assert len(summary_hits) == 1
+    assert summary_hits[0].name == "edit_message"
 
     changed_hits = idx.search_entities(
         "versionchanged 1.3 silent", kind="method", limit=5
     )
-    assert len(changed_hits) == 1
-    assert changed_hits[0].name == "edit_message"
+    assert changed_hits == []
 
     deprecated_hits = idx.search_entities(
         "Deprecated since version 1.4 update_message", kind="method", limit=5
     )
-    assert len(deprecated_hits) == 1
-    assert deprecated_hits[0].name == "edit_message"
+    assert deprecated_hits == []
 
     method = idx.get_entity_context("edit_message", kind="method")
     assert method is not None
@@ -656,6 +655,16 @@ def test_related_symbols_returns_outgoing_incoming_and_filters(
                 "line_end": 3,
                 "params": [],
                 "notes": [],
+                "xrefs": [
+                    {
+                        "edge_type": "references",
+                        "source_kind": "xref",
+                        "target_url": url,
+                        "target_anchor": "pkg.Message",
+                        "target_name": "Message",
+                        "snippet": "See Message.",
+                    }
+                ],
             },
             {
                 "local_id": "pkg.Message.edit",
@@ -720,12 +729,19 @@ def test_related_symbols_returns_outgoing_incoming_and_filters(
     )
 
     assert "related" not in plain_lookup
-    assert related_lookup["related"]["out"]
-    assert related_lookup["related"]["in"]
-    assert any(
-        edge["relation_label"] == "returned_by"
-        for edge in related_lookup["related"]["in"]
-    )
+    assert set(related_lookup["related"]["out"]) == {
+        "pkg.Message has_method pkg.Message.edit",
+        "pkg.Message has_method pkg.Message.send",
+    }
+    assert related_lookup["related"]["in"] == [
+        "pkg.Message.send references pkg.Message"
+    ]
+    assert not any(" returns " in edge for edge in related_lookup["related"]["in"])
+
+    hit = idx.search_entities("Message", kind="class", limit=1)[0]
+    result = entity_result_from_hit_with_related(idx, hit, "https://docs.example/")
+
+    assert result.related == related_lookup["related"]
 
 
 def test_related_symbols_not_found(tmp_path: Path) -> None:

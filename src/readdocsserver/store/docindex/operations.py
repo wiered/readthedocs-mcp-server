@@ -538,6 +538,7 @@ def search_entities_fts(
     if source_base is not None:
         where_extra += " AND e.source_base = ?"
         extra_args.append(source_base)
+    scoped_fts = f"{{name qualname signature summary}} : ({fts})"
     sql = f"""
         SELECT e.entity_id, e.kind, e.name, e.qualname, e.signature, e.summary,
                e.page_url, e.anchor, e.parent_entity_id, e.line_start, e.line_end,
@@ -549,7 +550,7 @@ def search_entities_fts(
         LIMIT ?
     """
     try:
-        rows = conn.execute(sql, (fts, *extra_args, limit)).fetchall()
+        rows = conn.execute(sql, (scoped_fts, *extra_args, limit)).fetchall()
         return [
             EntityHit(
                 entity_id=row["entity_id"],
